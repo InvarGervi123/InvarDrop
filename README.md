@@ -6,14 +6,19 @@ validation is pending a successful CI run.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 1
+## Current status — milestone 2.1 (feature branch)
 
-This is an application shell built with Tauri 2, React, TypeScript and Vite.
-The window shows the development status. There are no fake devices or simulated transfers.
+Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
+appear and disappear in the React UI without refresh. Each run advertises a
+random session ID and an anonymous readable name; discovered peers are unpaired.
 
-Discovery, pairing, receiver approval, encryption, file/folder transfer, progress,
-integrity checks, resuming, conversion, extraction and OS sharing integration are
-**not implemented**. Do not use this version to transfer files.
+Pairing, receiver approval, encryption, file/folder transfer, progress, integrity
+checks, resuming, conversion, extraction and OS sharing integration are **not
+implemented**. Discovery is unauthenticated and does not grant trust or access.
+No file-transfer listener is opened in this milestone.
+
+See [discovery architecture and testing (Russian)](docs/discovery.md) for protocol,
+privacy decisions, expiration/retry behavior, manual tests and limitations.
 
 The intended product has no accounts, cloud services, advertisements or paid APIs.
 Original files must never be modified by future preparation features.
@@ -79,25 +84,25 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 Manual smoke check: launch with `npm run tauri dev -- -- --locked`; confirm the InvarDrop title,
 readable development status, absence of device lists and transfer controls,
 window resizing, and normal close behavior. Repeat with the release executable.
-The shell has no domain logic yet, so Cargo may report zero tests. Native launch
-and rendering are manual checks in this milestone; CI compilation is not proof
-that a GUI was launched.
+Discovery has Rust unit tests. Native launch and real-network discovery are
+manual checks; CI compilation is not proof that a GUI or cross-device discovery
+was exercised. See the discovery document for the current test scenario.
 
 ## Structure and security boundaries
 
-- `src/`: React presentation; no privileged filesystem or network access.
-- `src-tauri/`: Rust application entry point; no custom commands or plugins yet.
-- `src-tauri/capabilities/`: explicit, currently empty IPC permission list.
+- `src/`: React presentation, read-only snapshot command and discovery event subscription.
+- `src-tauri/src/discovery/`: protocol, bounded device tracker and networking worker.
+- `src-tauri/capabilities/`: event listen/unlisten only; no shell/filesystem access.
 - `.github/workflows/ci.yml`: native Linux and Windows build checks.
 
 The production content security policy permits local assets and Tauri IPC only.
-Future discovery, transport and filesystem services belong in Rust; the UI will
-receive only the permissions needed for specific user actions. No networking,
-conversion or database dependencies are introduced in this milestone.
+Discovery runs in Rust. The UI receives only the data it displays. Future
+transport and filesystem services also belong in Rust; conversion and database
+dependencies are not introduced in this milestone.
 
 ## CI and distribution
 
-GitHub Actions checks pull requests and pushes to `main` on Ubuntu 24.04 and
+GitHub Actions checks pull requests and pushes to `main` / `feature/**` on Ubuntu 24.04 and
 Windows Server 2022. It type-checks, builds the native executable, checks Rust
 formatting, runs Clippy and Cargo tests, then uploads per-platform executables with the license and README (retained for
 seven days).
