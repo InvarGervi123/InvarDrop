@@ -1,19 +1,24 @@
 # InvarDrop
 
 Minimalist LAN file sharing application in development. Target platforms: Linux
-and Windows, with Android planned later. CachyOS has been tested locally; Windows
-validation is pending a successful CI run.
+and Windows, with Android planned later. Both are CI build targets; native
+discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 1
+## Current status — milestone 2.1 (feature branch)
 
-This is an application shell built with Tauri 2, React, TypeScript and Vite.
-The window shows the development status. There are no fake devices or simulated transfers.
+Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
+appear and disappear in the React UI without refresh. Each run advertises a
+random session ID and an anonymous readable name; discovered peers are unpaired.
 
-Discovery, pairing, receiver approval, encryption, file/folder transfer, progress,
-integrity checks, resuming, conversion, extraction and OS sharing integration are
-**not implemented**. Do not use this version to transfer files.
+Pairing, receiver approval, encryption, file/folder transfer, progress, integrity
+checks, resuming, conversion, extraction and OS sharing integration are **not
+implemented**. Discovery is unauthenticated and does not grant trust or access.
+No file-transfer listener is opened in this milestone.
+
+See [discovery architecture and testing (Russian)](docs/discovery.md) for protocol,
+privacy decisions, expiration/retry behavior, manual tests and limitations.
 
 The intended product has no accounts, cloud services, advertisements or paid APIs.
 Original files must never be modified by future preparation features.
@@ -21,8 +26,8 @@ Original files must never be modified by future preparation features.
 ## Development
 
 Use Node.js 24 LTS (see `.node-version`), npm and stable Rust with rustfmt and Clippy.
-Installing dependencies requires internet access; the application shell does not
-need an external service.
+Installing dependencies requires internet access; runtime discovery needs only
+a local network and does not use an external service.
 
 ### CachyOS / Arch Linux
 
@@ -76,28 +81,29 @@ cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D w
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
-Manual smoke check: launch with `npm run tauri dev -- -- --locked`; confirm the InvarDrop title,
-readable development status, absence of device lists and transfer controls,
-window resizing, and normal close behavior. Repeat with the release executable.
-The shell has no domain logic yet, so Cargo may report zero tests. Native launch
-and rendering are manual checks in this milestone; CI compilation is not proof
-that a GUI was launched.
+Manual smoke check: launch with `npm run tauri dev -- -- --locked`; confirm the
+local anonymous name and discovery status. Start a second instance, check mutual
+discovery without refresh, then close it and check disappearance. Verify window
+resizing and normal close behavior. Repeat with the release executable.
+Discovery has Rust unit tests. Native launch and real-network discovery are
+manual checks; CI compilation is not proof that a GUI or cross-device discovery
+was exercised. See the discovery document for the current test scenario.
 
 ## Structure and security boundaries
 
-- `src/`: React presentation; no privileged filesystem or network access.
-- `src-tauri/`: Rust application entry point; no custom commands or plugins yet.
-- `src-tauri/capabilities/`: explicit, currently empty IPC permission list.
+- `src/`: React presentation, read-only snapshot command and discovery event subscription.
+- `src-tauri/src/discovery/`: protocol, bounded device tracker and networking worker.
+- `src-tauri/capabilities/`: event listen/unlisten only; no shell/filesystem access.
 - `.github/workflows/ci.yml`: native Linux and Windows build checks.
 
 The production content security policy permits local assets and Tauri IPC only.
-Future discovery, transport and filesystem services belong in Rust; the UI will
-receive only the permissions needed for specific user actions. No networking,
-conversion or database dependencies are introduced in this milestone.
+Discovery runs in Rust. The UI receives only the data it displays. Future
+transport and filesystem services also belong in Rust; conversion and database
+dependencies are not introduced in this milestone.
 
 ## CI and distribution
 
-GitHub Actions checks pull requests and pushes to `main` on Ubuntu 24.04 and
+GitHub Actions checks pull requests and pushes to `main` / `feature/**` on Ubuntu 24.04 and
 Windows Server 2022. It type-checks, builds the native executable, checks Rust
 formatting, runs Clippy and Cargo tests, then uploads per-platform executables with the license and README (retained for
 seven days).
@@ -108,38 +114,37 @@ Node dependencies are locked in `package-lock.json`; Rust dependencies are locke
 in `src-tauri/Cargo.lock`. Native build, lint and test commands use `--locked`
 so dependency resolution cannot silently change. Both lockfiles belong in Git.
 
-No release publication is configured in milestone 1. A later release workflow
-will build tagged versions, package installers, include license/author notices,
-produce checksums and create a draft GitHub Release. The repository must be
-created and publishing approved separately.
+Public source: [InvarGervi123/InvarDrop](https://github.com/InvarGervi123/InvarDrop).
+No release publication is configured. A later, separately approved release
+workflow may package installers and create a draft GitHub Release.
 
-## Local validation — 2026-11-12
+## Local validation — milestone 2.1, 2026-11-12
 
 Validated on CachyOS x86_64, Niri/Wayland, WebKitGTK 2.54.2, Rust/Cargo 1.99.1,
-Node.js 26.13.1 and npm 12.2.2. CI uses Node.js 24 as declared in `.node-version`;
-that Node version and Windows have not been run locally.
+Node.js 26.13.1 and npm 12.2.2. CI uses Node.js 24.
 
 - Frontend type-check, Vite configuration type-check and production build passed.
-- Rustfmt and Clippy (`--all-targets`, warnings denied) passed.
+- Rustfmt and Clippy (`--all-targets`, warnings denied) passed; 13 Rust tests passed.
 - Locked native release build passed; no additional system packages were needed.
-- Cargo unit and documentation test harnesses passed with **zero test cases**.
-- npm audit reported zero known vulnerabilities; Cargo security audit was not run
-  because cargo-audit is not installed.
-- Both release and development GUI windows rendered correctly in native WebKitGTK
-  and closed normally. Release resizing to 360 × 420 was checked. A subsequent theme/layout update
-  fits the entire interface, including author credit, at that size.
-- CI YAML was parsed and its OS matrix, read-only permissions and action SHA pins
-  were checked locally. GitHub Actions itself has not been run.
+- Independent native processes discovered one another through real mDNS, excluded
+  themselves, kept live peers past the stale timeout and removed stopped/crashed peers.
+- A socket-denial test confirmed unavailable status, automatic retries and clean stop.
+- Production GUI rendered the real peer list at 360 × 420 and closed with exit 0.
+- The npm installation audit reported zero known vulnerabilities. Cargo security
+  audit was not run because cargo-audit is not installed.
 
-No installer packaging, Windows runtime validation or network functionality was
-validated in this milestone. No GitHub remote was created and nothing was pushed.
+See the [CI workflow](https://github.com/InvarGervi123/InvarDrop/actions/workflows/ci.yml)
+for hosted Linux/Windows build results and [discovery test notes](docs/discovery.md)
+for exact scope. Two separate physical devices, Windows GUI/multicast, installer
+packaging, Wi-Fi/VPN transitions and packet-loss behavior remain unverified.
+CI builds are not a substitute for those runtime/network tests.
 
 ## Automatic appearance
 
 The UI uses light/dark CSS custom properties and `prefers-color-scheme`.
 `color-scheme: light dark` also lets the WebView adapt native controls and
-scrollbars. There is no saved override, theme toggle, JavaScript subscription or
-additional dependency. WebView media-query updates repaint the UI without a
+scrollbars. There is no saved theme override, theme toggle, JavaScript theme subscription or
+additional theme dependency. WebView media-query updates repaint the UI without a
 reload. Tauri keeps its default system window theme.
 
 Windows uses the system appearance exposed by WebView2. On Linux, WebKitGTK uses
