@@ -1,0 +1,88 @@
+* { box-sizing: border-box; }
+
+:root {
+  color-scheme: light dark;
+  --background: #f6f8f5;
+  --surface: #ffffff;
+  --text: #20312d;
+  --muted: #52635b;
+  --border: #dae3da;
+  --accent: #245b48;
+  --on-accent: #ffffff;
+  --badge-background: #edf3ed;
+  --badge-text: #365644;
+  font-family: system-ui, sans-serif;
+  color: var(--text);
+  background: var(--background);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #111916;
+    --surface: #1b2621;
+    --text: #e5eee8;
+    --muted: #adbbb2;
+    --border: #35473d;
+    --accent: #a1d9ba;
+    --on-accent: #153a29;
+    --badge-background: #2b4034;
+    --badge-text: #bce3ca;
+  }
+}
+
+body { margin: 0; min-width: 320px; }
+.app {
+  min-height: 100vh;
+  min-height: 100svh;
+  max-width: 720px;
+  margin: auto;
+  padding: 32px 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  text-align: center;
+}
+header, footer { flex-shrink: 0; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 28px;
+}
+h1 { margin: 10px 0 4px; font-size: 28px; line-height: 1.2; letter-spacing: -1px; }
+p { margin: 0; line-height: 1.5; }
+header p { color: var(--muted); font-size: 14px; }
+.empty-state {
+  margin: auto 0;
+  padding: 24px 20px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+}
+.status {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: var(--badge-background);
+  color: var(--badge-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+h2 { margin: 16px 0 10px; font-size: 22px; line-height: 1.25; }
+.detail { max-width: 340px; margin: 12px auto 0; font-size: 13px; color: var(--muted); }
+footer { color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+@media (max-height: 540px), (max-width: 400px) {
+  .app { padding: 16px 20px; gap: 16px; }
+  .mark { width: 32px; height: 32px; border-radius: 10px; font-size: 24px; }
+  h1 { margin-top: 6px; font-size: 24px; }
+  .empty-state { padding: 16px; }
+  h2 { margin: 10px 0 8px; font-size: 20px; }
+  .detail { margin-top: 10px; }
+}
