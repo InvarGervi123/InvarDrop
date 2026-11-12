@@ -104,6 +104,7 @@ mod tests {
         Device {
             id: id.into(),
             name: format!("InvarDrop {id}"),
+            ..Default::default()
         }
     }
     fn tracker() -> Tracker {
@@ -162,6 +163,7 @@ mod tests {
         let renamed = Device {
             id: "peer".into(),
             name: "New name".into(),
+            ..Default::default()
         };
         t.observe("new", renamed.clone(), 1, now + Duration::from_secs(20));
         t.expire(now + STALE_AFTER);
