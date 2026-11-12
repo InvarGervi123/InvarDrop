@@ -124,7 +124,7 @@ Validated on CachyOS x86_64, Niri/Wayland, WebKitGTK 2.54.2, Rust/Cargo 1.99.1,
 Node.js 26.13.1 and npm 12.2.2. CI uses Node.js 24.
 
 - Frontend type-check, Vite configuration type-check and production build passed.
-- Rustfmt and Clippy (`--all-targets`, warnings denied) passed; 11 Rust tests passed.
+- Rustfmt and Clippy (`--all-targets`, warnings denied) passed; 13 Rust tests passed.
 - Locked native release build passed; no additional system packages were needed.
 - Independent native processes discovered one another through real mDNS, excluded
   themselves, kept live peers past the stale timeout and removed stopped/crashed peers.

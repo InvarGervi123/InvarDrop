@@ -11,6 +11,7 @@ struct Observation {
     device: Device,
     heartbeat: u64,
     last_seen: Instant,
+    active: bool,
 }
 
 /// Keep DNS service sources separately: removing one alias must not remove another.
@@ -33,7 +34,18 @@ impl Tracker {
         }
         let key = fullname.to_ascii_lowercase();
         if !self.observations.contains_key(&key) && self.observations.len() >= MAX_OBSERVATIONS {
-            return;
+            self.expire(now);
+            let oldest_inactive = self
+                .observations
+                .iter()
+                .filter(|(_, observation)| !observation.active)
+                .min_by_key(|(_, observation)| observation.last_seen)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest_inactive {
+                self.observations.remove(&oldest);
+            } else {
+                return;
+            }
         }
         if let Some(previous) = self.observations.get(&key) {
             // Cached/duplicate responses are not proof of life. Only a new heartbeat is.
@@ -47,22 +59,33 @@ impl Tracker {
                 device,
                 heartbeat,
                 last_seen: now,
+                active: true,
             },
         );
     }
 
     pub fn remove(&mut self, fullname: &str) {
-        self.observations.remove(&fullname.to_ascii_lowercase());
+        if let Some(observation) = self.observations.get_mut(&fullname.to_ascii_lowercase()) {
+            // Keep the marker so delayed cache responses cannot undo a goodbye.
+            observation.active = false;
+        }
     }
 
     pub fn expire(&mut self, now: Instant) {
-        self.observations
-            .retain(|_, v| now.saturating_duration_since(v.last_seen) < STALE_AFTER);
+        for observation in self.observations.values_mut() {
+            if now.saturating_duration_since(observation.last_seen) >= STALE_AFTER {
+                observation.active = false;
+            }
+        }
     }
 
     pub fn devices(&self) -> Vec<Device> {
         let mut unique: BTreeMap<&str, &Observation> = BTreeMap::new();
-        for observation in self.observations.values() {
+        for observation in self
+            .observations
+            .values()
+            .filter(|observation| observation.active)
+        {
             let current = unique.entry(&observation.device.id).or_insert(observation);
             if observation.last_seen > current.last_seen {
                 *current = observation;
@@ -155,5 +178,35 @@ mod tests {
         t.observe("0", device("0"), 1, now + Duration::from_secs(20));
         t.expire(now + STALE_AFTER);
         assert_eq!(t.devices(), vec![device("0")]);
+    }
+    #[test]
+    fn cached_responses_cannot_revive_expired_or_removed_sources() {
+        for goodbye in [false, true] {
+            let mut t = tracker();
+            let now = Instant::now();
+            t.observe("peer", device("peer"), 0, now);
+            if goodbye {
+                t.remove("peer");
+            } else {
+                t.expire(now + STALE_AFTER);
+            }
+            t.observe("peer", device("peer"), 0, now + STALE_AFTER);
+            assert!(t.devices().is_empty());
+            t.observe("peer", device("peer"), 1, now + STALE_AFTER);
+            assert_eq!(t.devices(), vec![device("peer")]);
+        }
+    }
+
+    #[test]
+    fn inactive_markers_are_bounded_and_evicted_to_admit_new_devices() {
+        let mut t = tracker();
+        let now = Instant::now();
+        for i in 0..MAX_OBSERVATIONS {
+            t.observe(&i.to_string(), device(&i.to_string()), 0, now);
+        }
+        t.expire(now + STALE_AFTER);
+        t.observe("new", device("new"), 0, now + STALE_AFTER);
+        assert_eq!(t.observations.len(), MAX_OBSERVATIONS);
+        assert_eq!(t.devices(), vec![device("new")]);
     }
 }
