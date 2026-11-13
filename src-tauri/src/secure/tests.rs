@@ -279,3 +279,229 @@ async fn reconnect_after_restart_uses_persisted_keys_without_repairing() {
     a.stop().await;
     b.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn asymmetric_trust_never_silently_downgrades_to_pairing() {
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let a = start(da.path(), Duration::from_secs(10)).await;
+    let b = start(db.path(), Duration::from_secs(10)).await;
+    let afp = a.snapshot().identity.unwrap();
+    store_lock(&get_store(&b.shared).unwrap())
+        .unwrap()
+        .trust(&afp)
+        .unwrap();
+    a.connect("asymmetric".into(), vec![addr(&b)]).unwrap();
+    let ac = phase(&a, "closed").await;
+    let bc = phase(&b, "closed").await;
+    assert!(ac.code.is_none() && bc.code.is_none());
+    assert!(a.snapshot().trusted.is_empty());
+    assert!(
+        ac.error == Some(Error::Identity.to_string())
+            || bc.error == Some(Error::Identity.to_string())
+    );
+    a.stop().await;
+    b.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partial_tcp_frame_survives_local_approval_without_reader_cancellation() {
+    use tokio::io::AsyncWriteExt;
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(dir.path(), Duration::from_secs(10)).await;
+    let identity = Identity::generate().unwrap();
+    let connector = transport::connector(&identity, None).unwrap();
+    let tcp = TcpStream::connect(addr(&server)).await.unwrap();
+    let mut tls: tokio_rustls::TlsStream<TcpStream> = connector
+        .connect("invardrop.local".try_into().unwrap(), tcp)
+        .await
+        .unwrap()
+        .into();
+    protocol::send(
+        &mut tls,
+        &Message::Hello {
+            version: 1,
+            initiator: true,
+            trusted: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        protocol::receive(&mut tls).await.unwrap(),
+        Message::Hello { version: 1, .. }
+    ));
+    let request = phase(&server, "verifying").await;
+    let (_, code) = transport::peer_and_code(&tls, &identity.fingerprint().unwrap(), true).unwrap();
+    assert!(
+        request.code.as_ref() == Some(&code),
+        "Codes must match without logging values"
+    );
+    let data = serde_json::to_vec(&Message::Decision { approve: true }).unwrap();
+    let length = (data.len() as u32).to_be_bytes();
+    tls.write_all(&length[..2]).await.unwrap();
+    tls.flush().await.unwrap();
+    server.respond(&request.id, true, code).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), protocol::receive(&mut tls))
+            .await
+            .unwrap()
+            .unwrap(),
+        Message::Decision { approve: true }
+    ));
+    tls.write_all(&length[2..]).await.unwrap();
+    tls.write_all(&data[..4]).await.unwrap();
+    tls.flush().await.unwrap();
+    sleep(Duration::from_millis(10)).await;
+    tls.write_all(&data[4..]).await.unwrap();
+    tls.flush().await.unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), protocol::receive(&mut tls))
+            .await
+            .unwrap()
+            .unwrap(),
+        Message::Ready {}
+    ));
+    protocol::send(&mut tls, &Message::Ready {}).await.unwrap();
+    phase(&server, "connected").await;
+    assert!(
+        server
+            .snapshot()
+            .trusted
+            .contains(&identity.fingerprint().unwrap())
+    );
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_approval_cannot_be_replayed_on_a_new_tls_channel() {
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let a = start(da.path(), Duration::from_secs(10)).await;
+    let b = start(db.path(), Duration::from_secs(10)).await;
+    a.connect("b".into(), vec![addr(&b)]).unwrap();
+    let old = phase(&a, "verifying").await;
+    let old_b = phase(&b, "verifying").await;
+    let old_code = old.code.unwrap();
+    a.respond(&old.id, true, old_code.clone()).unwrap();
+    assert!(matches!(
+        a.respond(&old.id, true, old_code.clone()),
+        Err(Error::Approval)
+    ));
+    a.cancel(&old.id).unwrap();
+    closed(&a, &old.id).await;
+    closed(&b, &old_b.id).await;
+    assert!(a.snapshot().trusted.is_empty() && b.snapshot().trusted.is_empty());
+
+    a.connect("b".into(), vec![addr(&b)]).unwrap();
+    let current = phase(&a, "verifying").await;
+    let current_b = phase(&b, "verifying").await;
+    let current_code = current.code.unwrap();
+    assert!(old_code != current_code, "A new channel needs a fresh code");
+    assert!(matches!(
+        a.respond(&old.id, true, current_code.clone()),
+        Err(Error::Approval)
+    ));
+    assert!(matches!(
+        a.respond(&current.id, true, old_code),
+        Err(Error::Approval)
+    ));
+    assert!(a.snapshot().trusted.is_empty() && b.snapshot().trusted.is_empty());
+    a.respond(&current.id, true, current_code).unwrap();
+    b.respond(&current_b.id, true, current_b.code.unwrap())
+        .unwrap();
+    phase(&a, "connected").await;
+    phase(&b, "connected").await;
+    a.stop().await;
+    b.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revocation_during_verification_blocks_until_explicit_unblock_and_new_pairing() {
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let a = start(da.path(), Duration::from_secs(10)).await;
+    let b = start(db.path(), Duration::from_secs(10)).await;
+    a.connect("b".into(), vec![addr(&b)]).unwrap();
+    let ac = phase(&a, "verifying").await;
+    let bc = phase(&b, "verifying").await;
+    let peer = b.snapshot().identity.unwrap();
+    a.revoke(peer.clone()).await.unwrap();
+    closed(&a, &ac.id).await;
+    closed(&b, &bc.id).await;
+    assert!(a.snapshot().trusted.is_empty() && b.snapshot().trusted.is_empty());
+    assert!(a.snapshot().revoked.contains(&peer));
+
+    let blocked = a.connect("b".into(), vec![addr(&b)]).unwrap();
+    closed(&a, &blocked).await;
+    let blocked = a
+        .snapshot()
+        .connections
+        .into_iter()
+        .find(|c| c.id == blocked)
+        .unwrap();
+    assert!(blocked.error == Some(Error::Revoked.to_string()));
+    assert!(blocked.code.is_none());
+    a.unblock(peer).await.unwrap();
+    assert!(a.snapshot().trusted.is_empty() && a.snapshot().revoked.is_empty());
+    // Unblocking only permits a fresh exchange with two new explicit approvals.
+    pair(&a, &b).await;
+    a.stop().await;
+    b.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connecting_to_own_identity_never_offers_pairing() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = start(dir.path(), Duration::from_secs(10)).await;
+    let id = s.connect("self".into(), vec![addr(&s)]).unwrap();
+    closed(&s, &id).await;
+    s.stop().await;
+    let snapshot = s.snapshot();
+    assert!(snapshot.trusted.is_empty());
+    assert!(snapshot.connections.len() == 2);
+    assert!(snapshot.connections.iter().all(|c| {
+        c.phase == "closed" && c.code.is_none() && c.error == Some(Error::Identity.to_string())
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_inflight_commit_still_publishes_saved_trust_for_revocation() {
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let a = start(da.path(), Duration::from_secs(10)).await;
+    let b = start(db.path(), Duration::from_secs(10)).await;
+    a.connect("b".into(), vec![addr(&b)]).unwrap();
+    let ac = phase(&a, "verifying").await;
+    let bc = phase(&b, "verifying").await;
+    let peer = b.snapshot().identity.unwrap();
+    let store = get_store(&a.shared).unwrap();
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let blocker = tokio::task::spawn_blocking(move || {
+        let _guard = store_lock(&store).unwrap();
+        locked_tx.send(()).unwrap();
+        // Dropping the sender also releases the lock if an assertion fails.
+        let _ = wait.recv_timeout(Duration::from_secs(10));
+    });
+    locked_rx.await.unwrap();
+    a.respond(&ac.id, true, ac.code.unwrap()).unwrap();
+    b.respond(&bc.id, true, bc.code.unwrap()).unwrap();
+    phase(&a, "committing").await;
+    a.cancel(&ac.id).unwrap();
+    closed(&a, &ac.id).await;
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    timeout(Duration::from_secs(5), async {
+        while !a.snapshot().trusted.contains(&peer) {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("A completed disk commit must be visible after cancellation");
+    a.revoke(peer.clone()).await.unwrap();
+    assert!(!a.snapshot().trusted.contains(&peer));
+    assert!(a.snapshot().revoked.contains(&peer));
+    a.stop().await;
+    b.stop().await;
+}

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export interface Device { id: string; name: string }
+export interface Device { id: string; name: string; canConnect: boolean }
 interface Snapshot {
   revision: number;
   localDevice: Device;

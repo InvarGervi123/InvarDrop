@@ -311,5 +311,80 @@ mod tests {
         assert!(store.revoke(&peer).is_err());
         assert!(!store.is_trusted(&peer));
         assert!(store.is_revoked(&peer));
+        assert!(store.unblock(&peer).is_err());
+        assert!(store.is_revoked(&peer));
+        assert!(matches!(store.trust(&peer), Err(Error::Revoked)));
+        drop(store);
+        // A reported write failure must not be mistaken for a durable revocation.
+        let mut store = Store::for_test(dir.path(), &master).unwrap();
+        assert!(store.is_trusted(&peer));
+        store.revoke(&peer).unwrap();
+        store.unblock(&peer).unwrap();
+        drop(store);
+        let store = Store::for_test(dir.path(), &master).unwrap();
+        assert!(!store.is_trusted(&peer));
+        assert!(!store.is_revoked(&peer));
+    }
+    #[test]
+    fn repeated_saves_use_fresh_nonces_and_preserve_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = random::<32>().unwrap();
+        let peer = Identity::generate().unwrap().fingerprint().unwrap();
+        let mut store = Store::for_test(dir.path(), &master).unwrap();
+        let identity = store.identity().fingerprint().unwrap();
+        store.trust(&peer).unwrap();
+        let before = fs::read(&store.path).unwrap();
+        store.trust(&peer).unwrap();
+        let after = fs::read(&store.path).unwrap();
+        assert!(before[MAGIC.len()..MAGIC.len() + 12] != after[MAGIC.len()..MAGIC.len() + 12]);
+        assert!(before[MAGIC.len() + 12..] != after[MAGIC.len() + 12..]);
+        drop(store);
+        let store = Store::for_test(dir.path(), &master).unwrap();
+        assert!(store.identity().fingerprint().unwrap() == identity);
+        assert!(store.is_trusted(&peer));
+    }
+    #[test]
+    fn truncated_oversized_and_unknown_header_files_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = random::<32>().unwrap();
+        let store = Store::for_test(dir.path(), &master).unwrap();
+        let path = store.path.clone();
+        let original = fs::read(&path).unwrap();
+        drop(store);
+        for length in [0, MAGIC.len(), MAGIC.len() + 12, original.len() - 1] {
+            fs::write(&path, &original[..length]).unwrap();
+            assert!(matches!(
+                Store::for_test(dir.path(), &master),
+                Err(Error::Corrupt)
+            ));
+        }
+        fs::write(&path, vec![0; MAX_FILE as usize + 1]).unwrap();
+        assert!(matches!(
+            Store::for_test(dir.path(), &master),
+            Err(Error::Corrupt)
+        ));
+        let mut bad_header = original;
+        bad_header[0] ^= 1;
+        fs::write(&path, bad_header).unwrap();
+        assert!(matches!(
+            Store::for_test(dir.path(), &master),
+            Err(Error::Corrupt)
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unix_profile_and_ciphertext_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let store = Store::for_test(dir.path(), &random::<32>().unwrap()).unwrap();
+        assert_eq!(
+            fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&store.path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

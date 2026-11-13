@@ -606,10 +606,16 @@ async fn application<W: tokio::io::AsyncWrite + Unpin>(
         })?;
         let store = get_store(s)?;
         let peer = peer.to_owned();
-        tokio::task::spawn_blocking(move || store_lock(&store)?.trust(&peer))
-            .await
-            .map_err(|_| Error::Storage)??;
-        refresh_trust(s)?;
+        let shared = s.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = store_lock(&store)?.trust(&peer);
+            // A filesystem commit can outlive connection cancellation. Publish its
+            // result from the same task so saved trust remains visible/revocable.
+            let refreshed = refresh_trust(&shared);
+            result.and(refreshed)
+        })
+        .await
+        .map_err(|_| Error::Storage)??;
     }
     let store = get_store(s)?;
     if !store_lock(&store)?.is_trusted(peer) {

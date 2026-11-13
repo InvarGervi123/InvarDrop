@@ -6,19 +6,29 @@ discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 2.1 (feature branch)
+## Current status — milestone 2.2 (feature branch)
 
 Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
 appear and disappear in the React UI without refresh. Each run advertises a
-random session ID and an anonymous readable name; discovered peers are unpaired.
+random session ID and an anonymous readable name. Discovery names remain unverified.
 
-Pairing, receiver approval, encryption, file/folder transfer, progress, integrity
-checks, resuming, conversion, extraction and OS sharing integration are **not
-implemented**. Discovery is unauthenticated and does not grant trust or access.
-No file-transfer listener is opened in this milestone.
+Secure pairing uses mutual TLS 1.3, a persistent P-256 identity and an explicit
+comparison of the full code on both devices. Trust is saved only after both
+approvals. Reconnect verifies the saved public key; the UI supports disconnect,
+trust revocation and explicitly allowing a fresh pairing after revocation.
+The OS credential store protects the master key for encrypted local identity and
+trust state. Linux needs an available, unlocked Secret Service; Windows uses
+Credential Manager. Storage failure disables secure connections without a plaintext
+fallback. The secure listener carries pairing and keepalive messages only.
+
+File/folder transfer, progress, file integrity checks, resuming, conversion,
+extraction and OS sharing integration are **not implemented**. Discovery is
+unauthenticated and does not grant trust or access.
 
 See [discovery architecture and testing (Russian)](docs/discovery.md) for protocol,
 privacy decisions, expiration/retry behavior, manual tests and limitations.
+See [secure pairing and threat model (Russian)](docs/security.md) for the current
+transport protocol, storage policy, approval boundaries and validation results.
 
 The intended product has no accounts, cloud services, advertisements or paid APIs.
 Original files must never be modified by future preparation features.
@@ -81,25 +91,29 @@ cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D w
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
-Manual smoke check: launch with `npm run tauri dev -- -- --locked`; confirm the
+Manual discovery smoke check: launch with `npm run tauri dev -- -- --locked`; confirm the
 local anonymous name and discovery status. Start a second instance, check mutual
 discovery without refresh, then close it and check disappearance. Verify window
 resizing and normal close behavior. Repeat with the release executable.
-Discovery has Rust unit tests. Native launch and real-network discovery are
-manual checks; CI compilation is not proof that a GUI or cross-device discovery
-was exercised. See the discovery document for the current test scenario.
+Discovery and secure pairing have Rust tests, including real TCP/TLS connections
+and encrypted storage. Native launch, system keyring and real-network discovery
+need separate checks; CI compilation is not proof that a GUI or cross-device
+connection was exercised. See [security validation](docs/security.md) for the
+milestone 2.2 two-profile runtime scenario and its limitations.
 
 ## Structure and security boundaries
 
-- `src/`: React presentation, read-only snapshot command and discovery event subscription.
+- `src/`: React discovery/pairing UI, snapshots, event subscriptions and explicit security actions.
 - `src-tauri/src/discovery/`: protocol, bounded device tracker and networking worker.
+- `src-tauri/src/secure/`: identities, encrypted storage, verified TLS and pairing state machine.
 - `src-tauri/capabilities/`: event listen/unlisten only; no shell/filesystem access.
 - `.github/workflows/ci.yml`: native Linux and Windows build checks.
 
 The production content security policy permits local assets and Tauri IPC only.
-Discovery runs in Rust. The UI receives only the data it displays. Future
-transport and filesystem services also belong in Rust; conversion and database
-dependencies are not introduced in this milestone.
+Discovery and secure transport run in Rust. The UI receives display data and
+submits pairing decisions by connection ID; it never receives private keys,
+master keys or routable endpoints. File services will also belong in Rust;
+conversion and database dependencies are not introduced in this milestone.
 
 ## CI and distribution
 

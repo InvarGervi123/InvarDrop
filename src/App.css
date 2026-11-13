@@ -100,3 +100,26 @@ footer { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .discovery-message { font-size: 14px; }
 .local-name { margin-top: 12px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 footer p + p { margin-top: 4px; }
+
+.workspace { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; text-align: center; }
+.workspace > * { flex-shrink: 0; }
+.workspace .empty-state { margin: 0; }
+.workspace .device-list { max-height: 180px; }
+button { font: inherit; font-size: 13px; font-weight: 600; padding: 8px 12px; border: 1px solid transparent; border-radius: 9px; cursor: pointer; background: var(--accent); color: var(--on-accent); }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.secondary { background: transparent; color: var(--text); border-color: var(--border); }
+.pair-card, .trust-settings { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); padding: 16px; }
+.pair-card h3 { margin: 0 0 10px; font-size: 17px; }
+.pair-card p, .trust-settings p { font-size: 13px; margin: 8px 0; }
+.pair-card button { margin: 4px; }
+.verification-code { display: block; font-size: 17px; line-height: 1.8; font-weight: 600; padding: 12px 4px; white-space: normal; overflow-wrap: anywhere; user-select: all; }
+.comparison-check { display: flex; align-items: flex-start; justify-content: center; gap: 8px; font-size: 13px; margin: 12px 0; text-align: start; }
+.comparison-check input { accent-color: var(--accent); flex-shrink: 0; }
+.peer-key, .service-status { color: var(--muted); font-size: 12px; }
+.error-text { color: var(--text); background: var(--surface); border-inline-start: 3px solid var(--accent); padding: 10px; font-size: 13px; overflow-wrap: anywhere; }
+.fingerprint { display: block; overflow-wrap: anywhere; font-size: 12px; user-select: all; }
+.trust-settings { font-size: 12px; text-align: start; }
+.trust-settings summary { cursor: pointer; padding: 4px; }
+.trust-settings ul { list-style: none; padding: 0; }
+.trust-settings li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 10px 0; }
