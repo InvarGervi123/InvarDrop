@@ -28,3 +28,8 @@ test-results/
 *.key
 *.p12
 *.pfx
+
+# Encrypted security state is local-only too
+identity.enc
+profile.lock
+security-v1/

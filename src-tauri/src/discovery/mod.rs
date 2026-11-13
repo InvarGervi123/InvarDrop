@@ -5,6 +5,8 @@ mod tracker;
 use mdns_sd::{DaemonEvent, Receiver, ServiceDaemon, ServiceEvent};
 use serde::Serialize;
 use std::{
+    net::SocketAddr,
+    sync::atomic::{AtomicU16, Ordering},
     sync::{Arc, Mutex, MutexGuard, mpsc},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -17,10 +19,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const EVENT_NAME: &str = "discovery-updated";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Device {
     pub id: String,
     pub name: String,
+    pub can_connect: bool,
+    #[serde(skip)]
+    pub endpoints: Vec<SocketAddr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -59,6 +65,13 @@ pub struct Discovery {
 
 impl Discovery {
     pub fn start(notify: impl Fn(Snapshot) + Send + Sync + 'static) -> Self {
+        Self::start_with_port(Arc::new(AtomicU16::new(0)), notify)
+    }
+
+    pub fn start_with_port(
+        port: Arc<AtomicU16>,
+        notify: impl Fn(Snapshot) + Send + Sync + 'static,
+    ) -> Self {
         let state = Arc::new(Mutex::new(Snapshot {
             revision: 0,
             local_device: protocol::local_device(),
@@ -69,7 +82,7 @@ impl Discovery {
         let worker_state = state.clone();
         let worker = thread::Builder::new()
             .name("invardrop-discovery".into())
-            .spawn(move || run(worker_state, receiver, Arc::new(notify)));
+            .spawn(move || run(worker_state, receiver, port, Arc::new(notify)));
         let worker = match worker {
             Ok(worker) => Some(worker),
             Err(error) => {
@@ -129,12 +142,12 @@ struct Session {
 }
 
 impl Session {
-    fn new(local: &Device, heartbeat: u64) -> mdns_sd::Result<Self> {
+    fn new(local: &Device, heartbeat: u64, port: u16) -> mdns_sd::Result<Self> {
         let daemon = ServiceDaemon::new()?;
         let initialize = || {
             let monitor = daemon.monitor()?;
             daemon.set_ip_check_interval(2)?;
-            let info = protocol::announcement(local, heartbeat)?;
+            let info = protocol::announcement(local, heartbeat, port)?;
             let fullname = info.get_fullname().to_owned();
             daemon.register(info)?;
             let services = daemon.browse(protocol::SERVICE_TYPE)?;
@@ -194,7 +207,12 @@ fn announcement_expired(last: Instant, announced: bool, now: Instant) -> bool {
     now.saturating_duration_since(last) >= limit
 }
 
-fn run(state: Arc<Mutex<Snapshot>>, stop: mpsc::Receiver<()>, notify: Notify) {
+fn run(
+    state: Arc<Mutex<Snapshot>>,
+    stop: mpsc::Receiver<()>,
+    port: Arc<AtomicU16>,
+    notify: Notify,
+) {
     let local = lock(&state).local_device.clone();
     // Keep heartbeats monotonic across daemon restarts within this application session.
     let mut heartbeat = 0_u64;
@@ -203,9 +221,11 @@ fn run(state: Arc<Mutex<Snapshot>>, stop: mpsc::Receiver<()>, notify: Notify) {
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        let result = Session::new(&local, heartbeat).and_then(|session| {
+        let advertised_port = port.load(Ordering::Acquire);
+        let result = Session::new(&local, heartbeat, advertised_port).and_then(|session| {
             let mut tracker = Tracker::new(local.id.clone());
             let mut last_heartbeat = Instant::now();
+            let mut last_port = advertised_port;
             let mut last_announcement = last_heartbeat;
             let mut announced = false;
             publish(&state, Status::Starting, Vec::new(), &notify);
@@ -254,12 +274,17 @@ fn run(state: Arc<Mutex<Snapshot>>, stop: mpsc::Receiver<()>, notify: Notify) {
                     Status::Starting
                 };
                 publish(&state, status, tracker.devices(), &notify);
-                if now.duration_since(last_heartbeat) >= HEARTBEAT_INTERVAL {
+                if now.duration_since(last_heartbeat) >= HEARTBEAT_INTERVAL
+                    || last_port != port.load(Ordering::Acquire)
+                {
                     heartbeat = heartbeat.wrapping_add(1);
-                    session
-                        .daemon
-                        .register(protocol::announcement(&local, heartbeat)?)?;
+                    session.daemon.register(protocol::announcement(
+                        &local,
+                        heartbeat,
+                        port.load(Ordering::Acquire),
+                    )?)?;
                     last_heartbeat = now;
+                    last_port = port.load(Ordering::Acquire);
                 }
             }
         });

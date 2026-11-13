@@ -7,16 +7,24 @@ pub(super) const SERVICE_TYPE: &str = "_invardrop._tcp.local.";
 pub(super) fn local_device() -> Device {
     let id = Uuid::new_v4().to_string();
     let name = format!("InvarDrop {}", &id[..8]);
-    Device { id, name }
+    Device {
+        id,
+        name,
+        ..Default::default()
+    }
 }
 
-pub(super) fn announcement(local: &Device, heartbeat: u64) -> mdns_sd::Result<ServiceInfo> {
+pub(super) fn announcement(
+    local: &Device,
+    heartbeat: u64,
+    port: u16,
+) -> mdns_sd::Result<ServiceInfo> {
     let marker = heartbeat.to_string();
     let props = [
         ("id", local.id.as_str()),
         ("name", local.name.as_str()),
-        ("v", "1"),
-        ("mode", "discovery"),
+        ("v", if port == 0 { "1" } else { "2" }),
+        ("mode", if port == 0 { "discovery" } else { "secure" }),
         ("beat", marker.as_str()),
     ];
     // Port zero is intentional: no transfer endpoint exists in this milestone.
@@ -25,7 +33,7 @@ pub(super) fn announcement(local: &Device, heartbeat: u64) -> mdns_sd::Result<Se
         &local.id,
         &format!("invardrop-{}.local.", local.id),
         "",
-        0,
+        port,
         &props[..],
     )?
     .enable_addr_auto();
@@ -41,8 +49,14 @@ pub(super) fn parse(service: &ResolvedService) -> Option<(Device, u64)> {
             .ends_with(SERVICE_TYPE)
         || !service.is_valid()
         || !service.ty_domain.eq_ignore_ascii_case(SERVICE_TYPE)
-        || service.get_property_val_str("v") != Some("1")
-        || service.get_property_val_str("mode") != Some("discovery")
+        || !matches!(
+            (
+                service.get_property_val_str("v"),
+                service.get_property_val_str("mode"),
+                service.get_port()
+            ),
+            (Some("1"), Some("discovery"), 0) | (Some("2"), Some("secure"), 1..=u16::MAX)
+        )
     {
         return None;
     }
@@ -60,9 +74,47 @@ pub(super) fn parse(service: &ResolvedService) -> Option<(Device, u64)> {
         Device {
             id: id.to_string(),
             name: name.into(),
+            can_connect: service.get_port() != 0 && !endpoints(service).is_empty(),
+            endpoints: endpoints(service),
         },
         heartbeat,
     ))
+}
+
+fn endpoints(service: &ResolvedService) -> Vec<std::net::SocketAddr> {
+    use mdns_sd::ScopedIp;
+    use std::net::{SocketAddr, SocketAddrV6};
+    if service.get_port() == 0 {
+        return vec![];
+    }
+    let mut addresses = service
+        .get_addresses()
+        .iter()
+        .filter_map(|ip| match ip {
+            ScopedIp::V4(a)
+                if a.addr().is_private() || a.addr().is_link_local() || a.addr().is_loopback() =>
+            {
+                Some(SocketAddr::new((*a.addr()).into(), service.get_port()))
+            }
+            ScopedIp::V6(a)
+                if a.addr().is_unique_local()
+                    || a.addr().is_unicast_link_local()
+                    || a.addr().is_loopback() =>
+            {
+                Some(SocketAddr::V6(SocketAddrV6::new(
+                    *a.addr(),
+                    service.get_port(),
+                    0,
+                    a.scope_id().index,
+                )))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    addresses.sort_by_key(|a| (!a.is_ipv4(), *a));
+    addresses.dedup();
+    addresses.truncate(8);
+    addresses
 }
 
 #[cfg(test)]
@@ -86,7 +138,7 @@ mod tests {
         let b = local_device();
         assert_ne!(a.id, b.id);
         assert!(a.name.starts_with("InvarDrop "));
-        let info = announcement(&a, 12).unwrap();
+        let info = announcement(&a, 12, 0).unwrap();
         assert_eq!(info.get_port(), 0);
         assert!(info.is_addr_auto());
         assert_eq!(info.get_properties().len(), 5);
@@ -129,5 +181,27 @@ mod tests {
             ("beat", "0"),
         ];
         assert!(parse(&resolved(&props)).is_none());
+    }
+    #[test]
+    fn secure_endpoints_are_versioned_and_public_addresses_are_not_dialed() {
+        let local = local_device();
+        let info = announcement(&local, 1, 30000).unwrap();
+        assert!(info.get_property_val_str("mode") == Some("secure"));
+        let props = [
+            ("id", local.id.as_str()),
+            ("name", local.name.as_str()),
+            ("v", "2"),
+            ("mode", "secure"),
+            ("beat", "1"),
+        ];
+        let make = |ip| {
+            ServiceInfo::new(SERVICE_TYPE, "test", "random.local.", ip, 30000, &props[..])
+                .unwrap()
+                .as_resolved_service()
+        };
+        let (local, _) = parse(&make("192.168.1.2")).unwrap();
+        assert!(local.can_connect && local.endpoints.len() == 1);
+        let (public, _) = parse(&make("8.8.8.8")).unwrap();
+        assert!(!public.can_connect && public.endpoints.is_empty());
     }
 }
