@@ -62,9 +62,9 @@ peer как application message и не пишется в логи. Это пр�
 4. По TLS передаётся только `decision(approve=true/false)`. Backend принимает
    локальное подтверждение только для текущего connection ID, совпадающего кода,
    корректной фазы и неистёкшего срока. Дубликаты/старые approvals отклоняются.
-5. Только после обоих approvals возможна фаза `committing` и запись доверия.
+5. Только после обоих approvals возможна фаза `committing`, скрытие кода и запись доверия.
    Затем обе стороны отправляют `ready`; лишь после remote ready UI показывает
-   `Secure connection` и убирает код.
+   `Secure connection`.
 
 Reject до локального подтверждения отменяет сессию. После отправленного согласия
 Cancel закрывает соединение, но **не является отзывом ранее сохранённого доверия**.
@@ -178,7 +178,7 @@ Revoke trust и отказ повторного соединения. Отдел
 Локально: CachyOS x86_64, Niri/Wayland, Linux 7.3.3, Rust 1.99.1,
 Node.js 26.13.1, npm 12.2.2; CI использует Node.js 24.
 
-- Полный `cargo test --locked`: 39 passed, 0 failed, без ignored tests.
+- Полный `cargo test --locked`: 40 passed, 0 failed, без ignored tests.
   Реальные TCP/TLS tests требуют разрешённых сокетов и запускались вне sandbox.
 - Rustfmt, Clippy `--all-targets -- -D warnings`, обе TypeScript-проверки,
   Vite production build и locked Tauri release build без bundle прошли.
@@ -189,6 +189,10 @@ Node.js 26.13.1, npm 12.2.2; CI использует Node.js 24.
 - Исправлена гонка отмены во время commit: сохранённый ключ мог отсутствовать
   в snapshot UI. Детерминированный тест блокирует store на время отмены, затем
   проверяет публикацию завершённого commit и возможность отзыва.
+- Чтение trust/revocation и публикация snapshot сериализованы: параллельный refresh
+  больше не может перезаписать новый отзыв старым списком с новой revision.
+  Регрессия с управляемым расписанием потоков воспроизводит ошибку в старом коде
+  и проходит после исправления; внешний notifier вызывается без удержания mutex.
 - Два независимых production GUI-процесса с отдельными `INVARDROP_PROFILE`
   использовали настоящий Linux Secret Service, реальные mDNS и TCP/TLS.
   Через AT-SPI проверены совпадение всех восьми групп кода без вывода значений,

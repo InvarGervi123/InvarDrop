@@ -309,14 +309,19 @@ fn get_store(s: &Shared) -> Result<SharedStore> {
 fn refresh_trust(s: &Shared) -> Result<()> {
     let store = get_store(s)?;
     let store = store_lock(&store)?;
-    let trusted = store.trusted();
-    let revoked = store.revoked();
-    drop(store);
-    update(s, |state| {
+    transaction(s, move |state| {
+        // Serialize reading durable policy with publication. Otherwise a delayed
+        // refresh can publish an older trust list with a newer snapshot revision.
+        let trusted = store.trusted();
+        let revoked = store.revoked();
+        #[cfg(test)]
+        tests::after_trust_read();
         state.snapshot.trusted = trusted;
         state.snapshot.revoked = revoked;
-    });
-    Ok(())
+        // Release policy before transaction invokes the external notifier.
+        drop(store);
+        Ok(())
+    })
 }
 fn listener_socket() -> Result<std::net::TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};

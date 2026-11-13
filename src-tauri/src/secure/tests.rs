@@ -20,6 +20,18 @@ use tokio::{
     time::{sleep, timeout},
 };
 
+thread_local! {
+    static TRUST_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+pub(super) fn after_trust_read() {
+    TRUST_READ_HOOK.with(|hook| {
+        if let Some(pause) = hook.borrow_mut().take() {
+            pause();
+        }
+    });
+}
+
 async fn start(root: &Path, duration: Duration) -> Service {
     start_with_master(root, duration, &random::<32>().unwrap()).await
 }
@@ -504,4 +516,55 @@ async fn cancelled_inflight_commit_still_publishes_saved_trust_for_revocation() 
     assert!(a.snapshot().revoked.contains(&peer));
     a.stop().await;
     b.stop().await;
+}
+
+#[test]
+fn a_delayed_trust_refresh_cannot_overwrite_a_newer_revocation_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::for_test(dir.path(), &random::<32>().unwrap()).unwrap();
+    let peer = Identity::generate().unwrap().fingerprint().unwrap();
+    store.trust(&peer).unwrap();
+    let store = Arc::new(Mutex::new(store));
+    let shared = make_shared(
+        Arc::new(AtomicU16::new(0)),
+        Arc::new(|_| {}),
+        Duration::from_secs(10),
+    );
+    *lock(&shared.store) = Some(store.clone());
+    let (read_tx, read_rx) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let delayed = shared.clone();
+    let worker = std::thread::spawn(move || {
+        TRUST_READ_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                read_tx.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(10)).unwrap();
+            }));
+        });
+        refresh_trust(&delayed).unwrap();
+    });
+    read_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    // If reading and publication can be separated, force a newer revoke to be
+    // published in that gap. A serialized refresh must finish before mutation.
+    let revoked_early = match store.try_lock() {
+        Ok(mut policy) => {
+            policy.revoke(&peer).unwrap();
+            true
+        }
+        Err(std::sync::TryLockError::WouldBlock) => false,
+        Err(error) => panic!("Unexpected policy lock error: {error}"),
+    };
+    if revoked_early {
+        refresh_trust(&shared).unwrap();
+    }
+    release.send(()).unwrap();
+    worker.join().unwrap();
+    if !revoked_early {
+        store_lock(&store).unwrap().revoke(&peer).unwrap();
+        refresh_trust(&shared).unwrap();
+    }
+    let snapshot = lock(&shared.state).snapshot.clone();
+    assert!(snapshot.trusted.is_empty());
+    assert!(snapshot.revoked.contains(&peer));
 }
