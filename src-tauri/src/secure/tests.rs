@@ -37,12 +37,13 @@ async fn start(root: &Path, duration: Duration) -> Service {
 }
 async fn start_with_master(root: &Path, duration: Duration, master: &[u8]) -> Service {
     let store = Store::for_test(root, master).unwrap();
-    let shared = make_shared(
+    let mut shared = make_shared(
         Arc::new(AtomicU16::new(0)),
         Arc::new(|_| {}),
         duration,
         root.join("received"),
     );
+    Arc::get_mut(&mut shared).unwrap().file_approval_duration = duration;
     let s = shared.clone();
     let task = tokio::spawn(async move {
         listen(s, Arc::new(Mutex::new(store))).await.unwrap();
@@ -206,7 +207,7 @@ async fn authenticated_tls_rejects_out_of_order_application_messages() {
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 2,
+            version: 3,
             initiator: true,
             trusted: false,
         },
@@ -215,7 +216,7 @@ async fn authenticated_tls_rejects_out_of_order_application_messages() {
     .unwrap();
     assert!(matches!(
         protocol::receive(&mut tls).await.unwrap(),
-        Message::Hello { version: 2, .. }
+        Message::Hello { version: 3, .. }
     ));
     protocol::send(&mut tls, &Message::Ready {}).await.unwrap();
     let c = phase(&server, "closed").await;
@@ -337,7 +338,7 @@ async fn partial_tcp_frame_survives_local_approval_without_reader_cancellation()
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 2,
+            version: 3,
             initiator: true,
             trusted: false,
         },
@@ -346,7 +347,7 @@ async fn partial_tcp_frame_survives_local_approval_without_reader_cancellation()
     .unwrap();
     assert!(matches!(
         protocol::receive(&mut tls).await.unwrap(),
-        Message::Hello { version: 2, .. }
+        Message::Hello { version: 3, .. }
     ));
     let request = phase(&server, "verifying").await;
     let (_, code) = transport::peer_and_code(&tls, &identity.fingerprint().unwrap(), true).unwrap();
@@ -631,7 +632,7 @@ async fn raw_connected(
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 2,
+            version: 3,
             initiator: true,
             trusted: true,
         },
@@ -641,7 +642,7 @@ async fn raw_connected(
     assert!(matches!(
         raw_message(&mut tls).await,
         Message::Hello {
-            version: 2,
+            version: 3,
             trusted: true,
             ..
         }
@@ -661,6 +662,7 @@ async fn raw_offer(
     protocol::send(
         tls,
         &Message::FileOffer {
+            sender_name: "Test sender".into(),
             id: id.clone(),
             name: "incoming.bin".into(),
             size,
@@ -736,6 +738,7 @@ async fn file_bytes_before_local_acceptance_close_tls_without_creating_a_file() 
     protocol::send(
         &mut tls,
         &Message::FileOffer {
+            sender_name: "Test sender".into(),
             id: id.clone(),
             name: "unapproved.bin".into(),
             size: 3,
@@ -860,6 +863,7 @@ async fn busy_file_offer_is_rejected_without_replacing_the_pending_consent() {
     protocol::send(
         &mut tls,
         &Message::FileOffer {
+            sender_name: "Test sender".into(),
             id: id.clone(),
             name: "first.bin".into(),
             size: 0,
@@ -872,6 +876,7 @@ async fn busy_file_offer_is_rejected_without_replacing_the_pending_consent() {
     protocol::send(
         &mut tls,
         &Message::FileOffer {
+            sender_name: "Test sender".into(),
             id: other.clone(),
             name: "second.bin".into(),
             size: 0,
@@ -901,6 +906,7 @@ async fn rejected_offer_id_cannot_be_reused_for_different_metadata_or_stale_cons
     protocol::send(
         &mut tls,
         &Message::FileOffer {
+            sender_name: "Test sender".into(),
             id: id.clone(),
             name: "first.bin".into(),
             size: 0,
@@ -917,6 +923,7 @@ async fn rejected_offer_id_cannot_be_reused_for_different_metadata_or_stale_cons
     protocol::send(
         &mut tls,
         &Message::FileOffer {
+            sender_name: "Test sender".into(),
             id: id.clone(),
             name: "replacement.bin".into(),
             size: 42,
@@ -934,6 +941,62 @@ async fn rejected_offer_id_cannot_be_reused_for_different_metadata_or_stale_cons
         .unwrap();
     assert!(connection.error == Some(Error::Protocol.to_string()));
     assert!(connection.transfer.unwrap().name == "first.bin");
+    no_received_files(&s);
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incoming_request_expires_without_approval_or_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = start(dir.path(), Duration::from_millis(500)).await;
+    let (mut tls, _, c) = raw_connected(&s).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    protocol::send(
+        &mut tls,
+        &Message::FileOffer {
+            id: id.clone(),
+            sender_name: "Kitchen laptop".into(),
+            name: "pending.txt".into(),
+            size: 3,
+        },
+    )
+    .await
+    .unwrap();
+    let offer = file_status(&s, &c.id, "awaiting_approval").await;
+    assert_eq!(offer.sender_name.as_deref(), Some("Kitchen laptop"));
+    no_received_files(&s);
+    closed(&s, &c.id).await;
+    file_status(&s, &c.id, "expired").await;
+    assert!(s.respond_file(&c.id, &id, true).is_err());
+    no_received_files(&s);
+    s.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsafe_sender_name_is_not_published_as_a_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = start(dir.path(), Duration::from_secs(10)).await;
+    let (mut tls, _, c) = raw_connected(&s).await;
+    protocol::send(
+        &mut tls,
+        &Message::FileOffer {
+            id: uuid::Uuid::new_v4().to_string(),
+            sender_name: "fake\u{202e}name".into(),
+            name: "pending.txt".into(),
+            size: 3,
+        },
+    )
+    .await
+    .unwrap();
+    closed(&s, &c.id).await;
+    assert!(
+        s.snapshot()
+            .connections
+            .iter()
+            .find(|e| e.id == c.id)
+            .unwrap()
+            .transfer
+            .is_none()
+    );
     no_received_files(&s);
     s.stop().await;
 }

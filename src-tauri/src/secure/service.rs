@@ -47,6 +47,7 @@ pub struct TransferView {
     pub id: String,
     pub direction: String,
     pub name: String,
+    pub sender_name: Option<String>,
     pub size: u64,
     pub status: String,
     pub path: Option<String>,
@@ -54,7 +55,10 @@ pub struct TransferView {
 }
 impl TransferView {
     fn active(&self) -> bool {
-        !matches!(self.status.as_str(), "complete" | "rejected" | "error")
+        !matches!(
+            self.status.as_str(),
+            "complete" | "rejected" | "expired" | "error"
+        )
     }
 }
 #[derive(Clone, Serialize)]
@@ -88,6 +92,7 @@ struct Entry {
     actions: mpsc::Sender<Action>,
     cancel: watch::Sender<bool>,
     rejected: bool,
+    approval_deadline: Option<Instant>,
 }
 struct State {
     snapshot: Snapshot,
@@ -103,6 +108,8 @@ struct Shared {
     port: Arc<AtomicU16>,
     attempts: Mutex<(Instant, u32)>,
     pairing_duration: Duration,
+    file_approval_duration: Duration,
+    local_name: Mutex<String>,
     receive_directory: PathBuf,
 }
 pub struct Service {
@@ -112,10 +119,12 @@ pub struct Service {
 impl Service {
     pub fn start(
         root: PathBuf,
+        local_name: String,
         port: Arc<AtomicU16>,
         notify: impl Fn(Snapshot) + Send + Sync + 'static,
     ) -> Self {
         let shared = make_shared(port, Arc::new(notify), PAIRING, root.join("received"));
+        *lock(&shared.local_name) = local_name;
         let s = shared.clone();
         let listener = tauri::async_runtime::spawn(async move {
             let loaded = tokio::task::spawn_blocking(move || Store::open(&root)).await;
@@ -271,6 +280,7 @@ impl Service {
                 id: uuid::Uuid::new_v4().to_string(),
                 direction: "outgoing".into(),
                 name: source.name.clone(),
+                sender_name: None,
                 size: source.size,
                 status: "offering".into(),
                 path: None,
@@ -300,6 +310,9 @@ impl Service {
                 || transfer.id != transfer_id
                 || transfer.direction != "incoming"
                 || transfer.status != "awaiting_approval"
+                || entry
+                    .approval_deadline
+                    .is_none_or(|deadline| Instant::now() >= deadline)
             {
                 return Err(Error::Approval);
             }
@@ -310,6 +323,7 @@ impl Service {
                     accept,
                 })
                 .map_err(|_| Error::Approval)?;
+            entry.approval_deadline = None;
             transfer.status = if accept { "receiving" } else { "rejected" }.into();
             Ok(())
         })
@@ -388,6 +402,8 @@ fn make_shared(
         port,
         attempts: Mutex::new((Instant::now(), 0)),
         pairing_duration,
+        file_approval_duration: FILE_APPROVAL,
+        local_name: Mutex::new("InvarDrop".into()),
         receive_directory,
     })
 }
@@ -536,6 +552,7 @@ fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> R
             actions: tx,
             cancel,
             rejected: false,
+            approval_deadline: None,
         });
     });
     let shared = s.clone();
@@ -555,7 +572,12 @@ fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> R
             if let Some(transfer) = &mut e.view.transfer
                 && transfer.active()
             {
-                transfer.status = "error".into();
+                transfer.status = if e.view.error == Some(Error::Expired.to_string()) {
+                    "expired"
+                } else {
+                    "error"
+                }
+                .into();
                 transfer.error = e.view.error.clone();
             }
         });
@@ -626,7 +648,7 @@ async fn connection(
         protocol::send(
             &mut stream,
             &Message::Hello {
-                version: 2,
+                version: 3,
                 initiator,
                 trusted,
             },
@@ -634,7 +656,7 @@ async fn connection(
         .await?;
         match protocol::receive(&mut stream).await? {
             Message::Hello {
-                version: 2,
+                version: 3,
                 initiator: other,
                 trusted: remote,
             } if other != initiator && remote == trusted => Ok(()),

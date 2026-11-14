@@ -112,9 +112,14 @@ pub fn run() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?.join("security-v1"));
             let handle = app.handle().clone();
-            app.manage(secure::Service::start(root, port, move |snapshot| {
-                let _ = handle.emit_to("main", secure::EVENT, snapshot);
-            }));
+            app.manage(secure::Service::start(
+                root,
+                app.state::<Discovery>().snapshot().local_device.name,
+                port,
+                move |snapshot| {
+                    let _ = handle.emit_to("main", secure::EVENT, snapshot);
+                },
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

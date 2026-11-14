@@ -25,6 +25,7 @@ function App() {
     <main className="app">
       <header><span className="mark" aria-hidden="true">↓</span><h1>InvarDrop</h1><p>File sharing. Close to home.</p></header>
       <div className="workspace">
+        {visibleConnections.map(c => <PairCard key={c.id} connection={c} operate={operate} />)}
         <section aria-labelledby="devices-title" className="empty-state">
           <span className="status" role="status">{unavailable ? "Discovery unavailable" : snapshot?.status === "searching" ? "Looking nearby" : "Starting discovery"}</span>
           <h2 id="devices-title">Nearby devices</h2>
@@ -40,7 +41,6 @@ function App() {
         {(securityBridgeError || security?.error) && <p role="alert" className="error-text">{security?.error ?? "Open the desktop app to use secure connections."}</p>}
         {error && <p role="alert" className="error-text">{error}</p>}
         {security?.receiveDirectory && <p className="receive-directory">Received files: <span dir="auto">{security.receiveDirectory}</span></p>}
-        {visibleConnections.map(c => <PairCard key={c.id} connection={c} operate={operate} />)}
         {security?.identity && <details className="trust-settings"><summary>Device identity &amp; trusted peers</summary>
           <p>Your public key fingerprint:</p><code className="fingerprint" dir="ltr">{security.identity}</code>
           <p>Discovery names are unverified. Only the key and full comparison code establish trust.</p>
