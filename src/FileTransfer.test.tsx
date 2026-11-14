@@ -13,7 +13,8 @@ it("renders sender, filename and readable size as text", () => {
   expect(screen.getByText("InvarDrop sender")).toBeTruthy();
   expect(screen.getByText("photo.png")).toBeTruthy();
   expect(screen.getByText("1.5 KiB · Incoming")).toBeTruthy();
-});
+// Cold DOM/ICU initialization can exceed the default 5 s on hosted Windows.
+}, 15_000);
 it("requires explicit confirmation and never approves on checkbox alone", async () => {
   const operate = vi.fn().mockResolvedValue(true);
   render(<FileTransfer connection={connection()} operate={operate} />);

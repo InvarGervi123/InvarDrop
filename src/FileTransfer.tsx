@@ -1,12 +1,14 @@
 import { useRef, useState } from "react";
 import type { SecureConnection } from "./useSecurity";
 
+const byteFormatter = new Intl.NumberFormat("en", { maximumFractionDigits: 1 });
+
 type Operate = (command: string, args: Record<string, unknown>) => Promise<boolean>;
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "Unknown size";
   const units = ["B", "KiB", "MiB", "GiB"];
   const index = bytes ? Math.min(3, Math.floor(Math.log(bytes) / Math.log(1024))) : 0;
-  return `${new Intl.NumberFormat("en", { maximumFractionDigits: 1 }).format(bytes / 1024 ** index)} ${units[index]}`;
+  return `${byteFormatter.format(bytes / 1024 ** index)} ${units[index]}`;
 }
 const labels: Record<string, string> = {
   offering: "Waiting for the receiver…", preparing: "Preparing file…",
