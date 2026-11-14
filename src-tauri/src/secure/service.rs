@@ -1,5 +1,6 @@
 use super::files::CommitGate;
 use super::{
+    bundle::{BundleSink, BundleSource, Event as BundleEvent, Manifest},
     error::{Error, Result},
     files::{self, Sink, Source},
     protocol::{self, Message, Pairing},
@@ -52,6 +53,8 @@ pub struct TransferView {
     pub name: String,
     pub sender_name: Option<String>,
     pub size: u64,
+    pub file_count: u32,
+    pub is_folder: bool,
     pub transferred: u64,
     pub bytes_per_second: Option<f64>,
     pub eta_seconds: Option<u64>,
@@ -76,6 +79,7 @@ pub struct Connection {
     pub code: Option<String>,
     pub local_approved: bool,
     pub can_reconnect: bool,
+    pub supports_bundles: bool,
     pub error: Option<String>,
     pub transfer: Option<TransferView>,
 }
@@ -278,6 +282,13 @@ impl Service {
         Ok(())
     }
     pub fn send_file(&self, id: &str, source: Source) -> Result<()> {
+        self.send_source(id, transfer::Outgoing::Single(source))
+    }
+    pub fn send_bundle(&self, id: &str, source: BundleSource) -> Result<()> {
+        source.manifest.validate()?;
+        self.send_source(id, transfer::Outgoing::Bundle(source))
+    }
+    fn send_source(&self, id: &str, source: transfer::Outgoing) -> Result<()> {
         transaction(&self.shared, |state| {
             let entry = state
                 .entries
@@ -294,12 +305,19 @@ impl Service {
             {
                 return Err(Error::NotReady);
             }
+            if !entry.view.supports_bundles
+                && (source.is_folder() || source.size() > files::LEGACY_MAX_FILE_SIZE)
+            {
+                return Err(Error::Protocol);
+            }
             let transfer = TransferView {
                 id: uuid::Uuid::new_v4().to_string(),
                 direction: "outgoing".into(),
-                name: source.name.clone(),
+                name: source.name().into(),
                 sender_name: None,
-                size: source.size,
+                size: source.size(),
+                file_count: source.file_count(),
+                is_folder: source.is_folder(),
                 transferred: 0,
                 bytes_per_second: None,
                 eta_seconds: None,
@@ -533,9 +551,18 @@ enum Input {
     Outgoing(Vec<SocketAddr>, Option<String>),
 }
 enum Action {
-    Pairing { approve: bool, code: String },
-    SendFile { id: String, source: Box<Source> },
-    ReceiveFile { id: String, accept: bool },
+    Pairing {
+        approve: bool,
+        code: String,
+    },
+    SendFile {
+        id: String,
+        source: Box<transfer::Outgoing>,
+    },
+    ReceiveFile {
+        id: String,
+        accept: bool,
+    },
 }
 fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> Result<String> {
     if *s.stop.borrow() || s.port.load(Ordering::Acquire) == 0 {
@@ -573,6 +600,7 @@ fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> R
                 code: None,
                 local_approved: false,
                 can_reconnect: false,
+                supports_bundles: false,
                 error: None,
                 transfer: None,
             },
@@ -695,11 +723,16 @@ async fn connection(
         }
         store.is_trusted(&peer)
     };
+    let version = if stream.get_ref().1.alpn_protocol() == Some(transport::ALPN) {
+        5
+    } else {
+        4
+    };
     let hello = async {
         protocol::send(
             &mut stream,
             &Message::Hello {
-                version: 4,
+                version,
                 initiator,
                 trusted,
             },
@@ -707,16 +740,17 @@ async fn connection(
         .await?;
         match protocol::receive(&mut stream).await? {
             Message::Hello {
-                version: 4,
+                version: other_version,
                 initiator: other,
                 trusted: remote,
-            } if other != initiator && remote == trusted => Ok(()),
+            } if other_version == version && other != initiator && remote == trusted => Ok(()),
             _ => Err(Error::Identity),
         }
     };
     tokio::select! {r=timeout(HANDSHAKE,hello)=>r.map_err(|_|Error::Expired)??,_=cancel.changed()=>return Err(Error::Cancelled),_=stop.changed()=>return Err(Error::Cancelled)};
     view(&s, id, |e| {
         e.view.peer = Some(peer.clone());
+        e.view.supports_bundles = version >= 5;
         e.target = target;
     });
     let (mut reader, mut writer) = tokio::io::split(stream);

@@ -12,7 +12,8 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 
-pub const ALPN: &[u8] = b"invardrop/4";
+pub const LEGACY_ALPN: &[u8] = b"invardrop/4";
+pub const ALPN: &[u8] = b"invardrop/5";
 /// Unknown keys are QUARANTINED, not trusted. TLS CertificateVerify signatures
 /// remain mandatory. Authority is established by pinned SPKI or out-of-band SAS.
 #[derive(Debug)]
@@ -129,7 +130,7 @@ pub fn acceptor(identity: &Identity) -> Result<TlsAcceptor> {
     .with_client_cert_verifier(Arc::new(QuarantinedVerifier { expected: None }))
     .with_single_cert(vec![identity.cert()], identity.key())
     .map_err(|_| Error::Identity)?;
-    config.alpn_protocols = vec![ALPN.to_vec()];
+    config.alpn_protocols = vec![ALPN.to_vec(), LEGACY_ALPN.to_vec()];
     config.send_tls13_tickets = 0;
     config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
     Ok(TlsAcceptor::from(Arc::new(config)))
@@ -144,7 +145,7 @@ pub fn connector(identity: &Identity, expected: Option<String>) -> Result<TlsCon
     .with_custom_certificate_verifier(Arc::new(QuarantinedVerifier { expected }))
     .with_client_auth_cert(vec![identity.cert()], identity.key())
     .map_err(|_| Error::Identity)?;
-    config.alpn_protocols = vec![ALPN.to_vec()];
+    config.alpn_protocols = vec![ALPN.to_vec(), LEGACY_ALPN.to_vec()];
     config.enable_sni = false;
     config.resumption = rustls::client::Resumption::disabled();
     Ok(TlsConnector::from(Arc::new(config)))
@@ -157,7 +158,7 @@ pub fn peer_and_code(
     initiator: bool,
 ) -> Result<(String, String)> {
     let common = stream.get_ref().1;
-    if common.alpn_protocol() != Some(ALPN)
+    if !matches!(common.alpn_protocol(), Some(ALPN) | Some(LEGACY_ALPN))
         || common.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
     {
         return Err(Error::Protocol);

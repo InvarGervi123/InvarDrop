@@ -5,8 +5,8 @@ import { FileTransfer, formatBytes, progressPercent } from "./FileTransfer";
 import type { SecureConnection } from "./useSecurity";
 afterEach(cleanup);
 const connection = (status = "awaiting_approval", id = "one"): SecureConnection => ({
-  id: "connection", phase: "connected", peer: "abc", code: null, localApproved: true, canReconnect: false, error: null,
-  transfer: { id, name: "photo.png", senderName: "InvarDrop sender", size: 1536, direction: "incoming", transferred: 0, bytesPerSecond: null, etaSeconds: null, status, path: null, error: null },
+  id: "connection", phase: "connected", peer: "abc", code: null, localApproved: true, canReconnect: false, supportsBundles: true, error: null,
+  transfer: { id, name: "photo.png", senderName: "InvarDrop sender", size: 1536, fileCount: 1, isFolder: false, direction: "incoming", transferred: 0, bytesPerSecond: null, etaSeconds: null, status, path: null, error: null },
 });
 it("renders sender, filename and readable size as text", () => {
   render(<FileTransfer connection={connection()} operate={vi.fn()} />);
@@ -96,4 +96,36 @@ it("progress is monotonic across actual byte samples",()=>{
   const t=connection().transfer!; let previous=0;
   for(const n of [0,1,512,1024,1536]) {t.transferred=n;const p=progressPercent(t);expect(p).toBeGreaterThanOrEqual(previous);expect(p).toBeLessThanOrEqual(100);previous=p;}
   expect(previous).toBe(100);
+});
+
+it("shows folder name, file count, total size and requires explicit folder approval", async () => {
+  const c = connection(); c.transfer!.name="Holiday"; c.transfer!.isFolder=true; c.transfer!.fileCount=12; c.transfer!.size=5*1024**3;
+  const operate=vi.fn().mockResolvedValue(true); render(<FileTransfer connection={c} operate={operate}/>);
+  expect(screen.getByText("Holiday")).toBeTruthy(); expect(screen.getByText("5 GiB · 12 files · folder · Incoming")).toBeTruthy();
+  const accept=screen.getByText("Accept folder") as HTMLButtonElement; expect(accept.disabled).toBe(true);
+  fireEvent.click(accept); expect(operate).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByText("I want to save this folder")); fireEvent.click(accept); fireEvent.click(accept);
+  await waitFor(()=>expect(operate).toHaveBeenCalledExactlyOnceWith("file_respond",{id:"connection",transferId:"one",accept:true}));
+});
+it("selects a folder through the native command and blocks duplicate picker actions", async () => {
+  const c=connection("complete"); let finish!:(ok:boolean)=>void;
+  const operate=vi.fn().mockImplementation(()=>new Promise<boolean>(resolve=>{finish=resolve;}));
+  render(<FileTransfer connection={c} operate={operate}/>); fireEvent.click(screen.getByText("Choose a folder to send"));fireEvent.click(screen.getByText("Choose files to send"));
+  expect(operate).toHaveBeenCalledExactlyOnceWith("folder_choose",{id:"connection"});finish(true);
+  await waitFor(()=>expect((screen.getByText("Choose files to send") as HTMLButtonElement).disabled).toBe(false));
+});
+it("hides folder selection for a legacy peer and during an active operation", () => {
+  const c=connection("complete"); c.supportsBundles=false; const view=render(<FileTransfer connection={c} operate={vi.fn()}/>);
+  expect(screen.queryByText("Choose a folder to send")).toBeNull();expect(screen.getByText("Choose a file to send")).toBeTruthy();
+  c.supportsBundles=true;c.transfer!.status="receiving"; view.rerender(<FileTransfer connection={c} operate={vi.fn()}/>);expect(screen.queryByText("Choose a folder to send")).toBeNull();
+});
+it("handles empty folder completion and formats the 64-bit size limit",()=>{
+  const c=connection("complete");c.transfer!.isFolder=true;c.transfer!.fileCount=0;c.transfer!.size=0;
+  render(<FileTransfer connection={c} operate={vi.fn()}/>);expect(screen.getByText("0 B · 0 files · folder · Incoming")).toBeTruthy();expect((screen.getByRole("progressbar") as HTMLProgressElement).value).toBe(100);expect(formatBytes(1024**4)).toBe("1 TiB");
+});
+it("declines a folder without approval and cancels the entire active operation", async()=>{
+  const c=connection();c.transfer!.isFolder=true;c.transfer!.fileCount=3;const operate=vi.fn().mockResolvedValue(true);const view=render(<FileTransfer connection={c} operate={operate}/>);
+  fireEvent.click(screen.getByText("Decline folder"));await waitFor(()=>expect(operate).toHaveBeenCalledWith("file_respond",{id:"connection",transferId:"one",accept:false}));
+  c.transfer!.status="receiving";view.rerender(<FileTransfer connection={c} operate={operate}/>);fireEvent.click(screen.getByText("Cancel transfer"));fireEvent.click(screen.getByText("Cancel transfer"));
+  await waitFor(()=>expect(operate).toHaveBeenCalledWith("file_cancel",{id:"connection",transferId:"one"}));expect(operate).toHaveBeenCalledTimes(2);
 });

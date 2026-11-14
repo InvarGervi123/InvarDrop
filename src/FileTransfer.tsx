@@ -6,8 +6,8 @@ const byteFormatter = new Intl.NumberFormat("en", { maximumFractionDigits: 1 });
 type Operate = (command: string, args: Record<string, unknown>) => Promise<boolean>;
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "Unknown size";
-  const units = ["B", "KiB", "MiB", "GiB"];
-  const index = bytes ? Math.min(3, Math.floor(Math.log(bytes) / Math.log(1024))) : 0;
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  const index = bytes ? Math.min(4, Math.floor(Math.log(bytes) / Math.log(1024))) : 0;
   return `${byteFormatter.format(bytes / 1024 ** index)} ${units[index]}`;
 }
 export function progressPercent(transfer: Transfer): number {
@@ -15,7 +15,7 @@ export function progressPercent(transfer: Transfer): number {
   return Math.floor(Math.min(100, Math.max(0, transfer.transferred / transfer.size * 100)) * 10) / 10;
 }
 const labels: Record<string, string> = {
-  offering: "Waiting for the receiver…", preparing: "Preparing file…",
+  offering: "Waiting for the receiver…", preparing: "Preparing transfer…",
   sending: "Transferring · sending file…", receiving: "Transferring · receiving file…",
   cancelling: "Cancelling…", cancelled: "Cancelled", committing: "Saving verified file…",
   finalizing: "Verifying and saving…", complete: "Completed · BLAKE3 verified",
@@ -33,7 +33,7 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
   const waiting = transfer?.status === "awaiting_approval";
   const active = transfer && !["complete", "rejected", "expired", "cancelled", "error"].includes(transfer.status);
   const answered = transfer && respondedId === transfer.id;
-  const run = async (accept?: boolean) => {
+  const run = async (accept?: boolean, folder = false) => {
     if (busy.current || (accept !== undefined && (!transfer || answered || !waiting || (accept && confirmedId !== transfer.id)))) return;
     busy.current = true; setPending(true);
     // Lock this request immediately, including the interval before the backend event.
@@ -41,7 +41,7 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
     if (accept !== undefined && request) setRespondedId(request);
     try {
       const ok = accept === undefined
-        ? await operate("file_choose", { id: connection.id })
+        ? await operate(folder ? "folder_choose" : "file_choose", { id: connection.id })
         : await operate("file_respond", { id: connection.id, transferId: request, accept });
       if (!ok && accept !== undefined) setRespondedId(null);
     } catch { setRespondedId(null); }
@@ -54,15 +54,17 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
     catch { setCancelId(null); }
     finally { busy.current = false; setPending(false); }
   };
-  const status = waiting ? incoming ? "Waiting for your decision" : "Waiting for the receiver…"
+  const statusText = waiting ? incoming ? "Waiting for your decision" : "Waiting for the receiver…"
     : transfer?.status === "finalizing" && !incoming ? "Waiting for verification…"
     : labels[transfer?.status ?? ""] ?? "Processing file…";
+  const status = transfer?.isFolder ? statusText.replace(/file/g, "folder") : statusText;
   return <div className="file-transfer">
-    {connection.phase === "connected" && !active && <button type="button" disabled={pending || Boolean(active)} onClick={() => void run()}>Choose a file to send</button>}
+    {connection.phase === "connected" && !active && <button type="button" disabled={pending || Boolean(active)} onClick={() => void run()}>Choose {connection.supportsBundles ? "files" : "a file"} to send</button>}
+    {connection.phase === "connected" && connection.supportsBundles && !active && <button type="button" className="secondary" disabled={pending} onClick={() => void run(undefined, true)}>Choose a folder to send</button>}
     {transfer && <section className="file-request" aria-label={incoming ? "Incoming file request" : "Outgoing file"}>
       {incoming && <p className="sender-name">From <strong dir="auto">{transfer.senderName ?? "Paired device"}</strong><small>Device-reported name · verified key shown above</small></p>}
       <p className="file-name" dir="auto">{transfer.name}</p>
-      <p className="file-size" title={`${transfer.size.toLocaleString()} bytes`}>{formatBytes(transfer.size)} · {incoming ? "Incoming" : "Outgoing"}</p>
+      <p className="file-size" title={`${transfer.size.toLocaleString()} bytes`}>{formatBytes(transfer.size)}{transfer.isFolder && <> · {transfer.fileCount} files · folder</>} · {incoming ? "Incoming" : "Outgoing"}</p>
       <p className={`request-status request-${transfer.status}`} role="status">{status}</p>
       <div className="transfer-metrics" aria-label="Transfer statistics">
         <progress aria-label="File data progress" max={100} value={progressPercent(transfer)} />
@@ -73,10 +75,10 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
       {connection.phase === "connected" && active && !(incoming && waiting) && transfer.status !== "committing" && <button type="button" className="secondary" disabled={pending || cancelId === transfer.id || transfer.status === "cancelling"} onClick={() => void cancelTransfer()}>Cancel transfer</button>}
       {transfer.status === "cancelled" && <p className="file-hint">Transfer stopped. Reconnect to send another file.</p>}
       {incoming && waiting && connection.phase === "connected" && <>
-        <label className="comparison-check"><input type="checkbox" checked={confirmedId === transfer.id} disabled={pending || Boolean(answered)} onChange={event => setConfirmedId(event.target.checked ? transfer.id : null)} />I want to save this file</label>
+        <label className="comparison-check"><input type="checkbox" checked={confirmedId === transfer.id} disabled={pending || Boolean(answered)} onChange={event => setConfirmedId(event.target.checked ? transfer.id : null)} />I want to save this {transfer.isFolder ? "folder" : "file"}</label>
         <div className="request-actions">
-          <button type="button" className="secondary" disabled={pending || Boolean(answered)} onClick={() => void run(false)}>Decline file</button>
-          <button type="button" disabled={pending || Boolean(answered) || confirmedId !== transfer.id} onClick={() => void run(true)}>Accept file</button>
+          <button type="button" className="secondary" disabled={pending || Boolean(answered)} onClick={() => void run(false)}>Decline {transfer.isFolder ? "folder" : "file"}</button>
+          <button type="button" disabled={pending || Boolean(answered) || confirmedId !== transfer.id} onClick={() => void run(true)}>Accept {transfer.isFolder ? "folder" : "file"}</button>
         </div>
         <p className="file-hint">{answered ? "Decision sent…" : "Nothing is saved until you accept. The request expires after 90 seconds."}</p>
       </>}

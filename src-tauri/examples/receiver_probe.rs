@@ -79,10 +79,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("cancel requested");
                 }
                 "send" => {
-                    let source = tauri::async_runtime::block_on(Source::open(
-                        std::path::Path::new(&args[2]),
-                    ))?;
-                    service.send_file(&id, source)?;
+                    let path = std::path::Path::new(&args[2]);
+                    if path.is_dir() {
+                        let source = tauri::async_runtime::block_on(
+                            invardrop_lib::secure::bundle::BundleSource::folder(path),
+                        )?;
+                        service.send_bundle(&id, source)?;
+                    } else {
+                        let source = tauri::async_runtime::block_on(Source::open(path))?;
+                        service.send_file(&id, source)?;
+                    }
                     println!("sent");
                 }
                 "quit" => return Ok(()),

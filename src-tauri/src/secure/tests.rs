@@ -210,7 +210,7 @@ async fn authenticated_tls_rejects_out_of_order_application_messages() {
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 4,
+            version: 5,
             initiator: true,
             trusted: false,
         },
@@ -219,7 +219,7 @@ async fn authenticated_tls_rejects_out_of_order_application_messages() {
     .unwrap();
     assert!(matches!(
         protocol::receive(&mut tls).await.unwrap(),
-        Message::Hello { version: 4, .. }
+        Message::Hello { version: 5, .. }
     ));
     protocol::send(&mut tls, &Message::Ready {}).await.unwrap();
     let c = phase(&server, "closed").await;
@@ -341,7 +341,7 @@ async fn partial_tcp_frame_survives_local_approval_without_reader_cancellation()
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 4,
+            version: 5,
             initiator: true,
             trusted: false,
         },
@@ -350,7 +350,7 @@ async fn partial_tcp_frame_survives_local_approval_without_reader_cancellation()
     .unwrap();
     assert!(matches!(
         protocol::receive(&mut tls).await.unwrap(),
-        Message::Hello { version: 4, .. }
+        Message::Hello { version: 5, .. }
     ));
     let request = phase(&server, "verifying").await;
     let (_, code) = transport::peer_and_code(&tls, &identity.fingerprint().unwrap(), true).unwrap();
@@ -618,6 +618,13 @@ async fn raw_message(tls: &mut tokio_rustls::TlsStream<TcpStream>) -> Message {
 async fn raw_connected(
     service: &Service,
 ) -> (tokio_rustls::TlsStream<TcpStream>, String, Connection) {
+    raw_connected_version(service, false).await
+}
+async fn raw_connected_version(
+    service: &Service,
+    legacy: bool,
+) -> (tokio_rustls::TlsStream<TcpStream>, String, Connection) {
+    let version = if legacy { 4 } else { 5 };
     let identity = Identity::generate().unwrap();
     let peer = identity.fingerprint().unwrap();
     store_lock(&get_store(&service.shared).unwrap())
@@ -626,6 +633,11 @@ async fn raw_connected(
         .unwrap();
     refresh_trust(&service.shared).unwrap();
     let connector = transport::connector(&identity, service.snapshot().identity).unwrap();
+    let mut config = connector.config().as_ref().clone();
+    if legacy {
+        config.alpn_protocols = vec![transport::LEGACY_ALPN.to_vec()];
+    }
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let tcp = TcpStream::connect(addr(service)).await.unwrap();
     let mut tls: tokio_rustls::TlsStream<TcpStream> = connector
         .connect("invardrop.local".try_into().unwrap(), tcp)
@@ -635,7 +647,7 @@ async fn raw_connected(
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 4,
+            version,
             initiator: true,
             trusted: true,
         },
@@ -645,10 +657,10 @@ async fn raw_connected(
     assert!(matches!(
         raw_message(&mut tls).await,
         Message::Hello {
-            version: 4,
+            version: received_version,
             trusted: true,
             ..
-        }
+        } if received_version == version
     ));
     assert!(matches!(raw_message(&mut tls).await, Message::Ready {}));
     protocol::send(&mut tls, &Message::Ready {}).await.unwrap();
@@ -1080,7 +1092,7 @@ async fn sender_file_cancel_interrupts_backpressure_without_false_completion() {
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 4,
+            version: 5,
             initiator: false,
             trusted: true,
         },
@@ -1337,5 +1349,593 @@ async fn transport_loss_during_finalization_cancels_unpublished_file() {
     let failed = file_status(&s, &c.id, "error").await;
     assert!(failed.path.is_none());
     no_received_files(&s);
+    s.stop().await;
+}
+
+fn bundle_manifest(size: u64) -> Manifest {
+    use super::super::bundle::{Entry, Kind};
+    Manifest {
+        name: "Folder".into(),
+        total: size,
+        entries: vec![Entry {
+            path: "file.bin".into(),
+            kind: Kind::File,
+            size,
+        }],
+    }
+}
+async fn raw_bundle_offer(
+    s: &Service,
+    c: &str,
+    tls: &mut tokio_rustls::TlsStream<TcpStream>,
+    manifest: Manifest,
+) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    let count = manifest.file_count();
+    let size = manifest.total;
+    protocol::send(
+        tls,
+        &Message::BundleOffer {
+            id: id.clone(),
+            sender_name: "Folder sender".into(),
+            manifest,
+        },
+    )
+    .await
+    .unwrap();
+    let offer = file_status(s, c, "awaiting_approval").await;
+    assert!(offer.id == id && offer.is_folder && offer.file_count == count && offer.size == size);
+    no_received_files(s);
+    id
+}
+async fn accept_bundle(
+    s: &Service,
+    c: &str,
+    tls: &mut tokio_rustls::TlsStream<TcpStream>,
+    id: &str,
+) {
+    s.respond_file(c, id, true).unwrap();
+    assert!(matches!(
+        raw_message(tls).await,
+        Message::FileAccept { accept: true, .. }
+    ));
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_tls_folder_and_multi_file_transfers_preserve_tree_and_aggregate_size() {
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let a = start(da.path(), Duration::from_secs(10)).await;
+    let b = start(db.path(), Duration::from_secs(10)).await;
+    let (ac, bc) = pair(&a, &b).await;
+    assert!(ac.supports_bundles && bc.supports_bundles);
+    let folder = da.path().join("nested");
+    std::fs::create_dir_all(folder.join("sub/empty")).unwrap();
+    std::fs::write(
+        folder.join("sub/data"),
+        vec![0x5a; files::CHUNK_SIZE * 4 + 7],
+    )
+    .unwrap();
+    for i in 0..80 {
+        std::fs::write(folder.join(format!("zero{i:03}")), []).unwrap();
+    }
+    for source in [
+        BundleSource::folder(&folder).await.unwrap(),
+        BundleSource::files(vec![folder.join("sub/data"), folder.join("zero000")])
+            .await
+            .unwrap(),
+    ] {
+        let total = source.manifest.total;
+        let count = source.manifest.file_count();
+        a.send_bundle(&ac.id, source).unwrap();
+        let offer = file_status(&b, &bc.id, "awaiting_approval").await;
+        assert_eq!(offer.file_count, count);
+        assert!(offer.is_folder);
+        assert_eq!(offer.size, total);
+        if count == 81 {
+            no_received_files(&b);
+        }
+        b.respond_file(&bc.id, &offer.id, true).unwrap();
+        assert!(b.respond_file(&bc.id, &offer.id, true).is_err());
+        let complete = file_status(&b, &bc.id, "complete").await;
+        let sender = file_status(&a, &ac.id, "complete").await;
+        assert_eq!(complete.transferred, total);
+        assert_eq!(sender.transferred, total);
+        let path = PathBuf::from(complete.path.unwrap());
+        if count == 81 {
+            assert!(path.join("sub/empty").is_dir());
+            assert_eq!(
+                std::fs::read(path.join("sub/data")).unwrap(),
+                vec![0x5a; files::CHUNK_SIZE * 4 + 7]
+            );
+        } else {
+            assert!(path.join("data").is_file());
+            assert_eq!(std::fs::metadata(path.join("zero000")).unwrap().len(), 0);
+        }
+    }
+    a.stop().await;
+    b.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bundle_rejection_expiration_and_unapproved_data_save_nothing() {
+    for scenario in 0..3 {
+        let dir = tempfile::tempdir().unwrap();
+        let s = start(
+            dir.path(),
+            if scenario == 1 {
+                Duration::from_millis(300)
+            } else {
+                Duration::from_secs(10)
+            },
+        )
+        .await;
+        let (mut tls, _, c) = raw_connected(&s).await;
+        let id = raw_bundle_offer(&s, &c.id, &mut tls, bundle_manifest(3)).await;
+        match scenario {
+            0 => {
+                s.respond_file(&c.id, &id, false).unwrap();
+                assert!(matches!(
+                    raw_message(&mut tls).await,
+                    Message::FileAccept { accept: false, .. }
+                ));
+                file_status(&s, &c.id, "rejected").await;
+            }
+            1 => {
+                closed(&s, &c.id).await;
+                file_status(&s, &c.id, "expired").await;
+                assert!(s.respond_file(&c.id, &id, true).is_err());
+            }
+            _ => {
+                protocol::send(
+                    &mut tls,
+                    &Message::FileChunk {
+                        id,
+                        data: b"abc".to_vec(),
+                    },
+                )
+                .await
+                .unwrap();
+                closed(&s, &c.id).await;
+            }
+        }
+        no_received_files(&s);
+        s.stop().await;
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_bundle_corruption_early_end_and_disconnect_clean_all_staging() {
+    for scenario in 0..6 {
+        let dir = tempfile::tempdir().unwrap();
+        let s = start(dir.path(), Duration::from_secs(10)).await;
+        let (mut tls, _, c) = raw_connected(&s).await;
+        if scenario == 0 {
+            let mut manifest = bundle_manifest(3);
+            manifest.entries[0].path = "../escape".into();
+            protocol::send(
+                &mut tls,
+                &Message::BundleOffer {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    sender_name: "bad".into(),
+                    manifest,
+                },
+            )
+            .await
+            .unwrap();
+            closed(&s, &c.id).await;
+        } else {
+            let id = raw_bundle_offer(&s, &c.id, &mut tls, bundle_manifest(3)).await;
+            accept_bundle(&s, &c.id, &mut tls, &id).await;
+            protocol::send(
+                &mut tls,
+                &Message::FileChunk {
+                    id: id.clone(),
+                    data: b"abc".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+            match scenario {
+                1 => protocol::send(
+                    &mut tls,
+                    &Message::BundleFileEnd {
+                        id,
+                        index: 0,
+                        hash: blake3::hash(b"bad").to_hex().to_string(),
+                    },
+                )
+                .await
+                .unwrap(),
+                2 => protocol::send(&mut tls, &Message::BundleEnd { id })
+                    .await
+                    .unwrap(),
+                3 => protocol::send(
+                    &mut tls,
+                    &Message::BundleFileEnd {
+                        id,
+                        index: 1,
+                        hash: blake3::hash(b"abc").to_hex().to_string(),
+                    },
+                )
+                .await
+                .unwrap(),
+                4 => {
+                    s.cancel_file(&c.id, &id).unwrap();
+                }
+                _ => {}
+            }
+            drop(tls);
+            closed(&s, &c.id).await;
+        }
+        no_received_files(&s);
+        s.stop().await;
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sender_cancels_bundle_under_backpressure_without_false_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = start(dir.path(), Duration::from_secs(10)).await;
+    let (mut tls, _, c) = raw_connected(&s).await;
+    let folder = dir.path().join("LargeFolder");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::File::create(folder.join("large.bin"))
+        .unwrap()
+        .set_len(128 * 1024 * 1024)
+        .unwrap();
+    s.send_bundle(&c.id, BundleSource::folder(&folder).await.unwrap())
+        .unwrap();
+    let id = match raw_message(&mut tls).await {
+        Message::BundleOffer { id, .. } => id,
+        _ => panic!("Expected bundle"),
+    };
+    protocol::send(
+        &mut tls,
+        &Message::FileAccept {
+            id: id.clone(),
+            accept: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        raw_message(&mut tls).await,
+        Message::FileChunk { .. }
+    ));
+    s.cancel_file(&c.id, &id).unwrap();
+    timeout(Duration::from_secs(3), closed(&s, &c.id))
+        .await
+        .unwrap();
+    let result = file_status(&s, &c.id, "cancelled").await;
+    assert!(result.path.is_none() && result.transferred > 0 && result.transferred < result.size);
+    s.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bundle_finalization_cancellation_and_disconnect_preserve_commit_boundary() {
+    for scenario in 0..3 {
+        let dir = tempfile::tempdir().unwrap();
+        let s = start(dir.path(), Duration::from_secs(10)).await;
+        let (mut tls, _, c) = raw_connected(&s).await;
+        let manifest = bundle_manifest(3);
+        let id = raw_bundle_offer(&s, &c.id, &mut tls, manifest).await;
+        accept_bundle(&s, &c.id, &mut tls, &id).await;
+        let gate = lock(&s.shared.state)
+            .entries
+            .iter()
+            .find(|e| e.view.id == c.id)
+            .unwrap()
+            .gate
+            .clone();
+        let (at, reached) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let hook = move || {
+            let _ = at.send(());
+            let _ = wait.recv_timeout(Duration::from_secs(10));
+        };
+        if scenario == 1 {
+            gate.pause_after(hook);
+        } else {
+            gate.pause_before(hook);
+        }
+        protocol::send(
+            &mut tls,
+            &Message::FileChunk {
+                id: id.clone(),
+                data: b"abc".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        protocol::send(
+            &mut tls,
+            &Message::BundleFileEnd {
+                id: id.clone(),
+                index: 0,
+                hash: blake3::hash(b"abc").to_hex().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        protocol::send(&mut tls, &Message::BundleEnd { id: id.clone() })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        if scenario == 2 {
+            drop(tls);
+            closed(&s, &c.id).await;
+        } else if scenario == 1 {
+            assert_eq!(s.cancel_file(&c.id, &id), Err(Error::CommitStarted));
+        } else {
+            s.cancel_file(&c.id, &id).unwrap();
+            closed(&s, &c.id).await;
+        }
+        release.send(()).unwrap();
+        let result = file_status(
+            &s,
+            &c.id,
+            match scenario {
+                0 => "cancelled",
+                1 => "complete",
+                _ => "error",
+            },
+        )
+        .await;
+        if scenario == 1 {
+            assert!(Path::new(&result.path.unwrap()).is_dir());
+            assert_eq!(result.transferred, 3);
+        } else {
+            assert!(result.path.is_none());
+            no_received_files(&s);
+        }
+        s.stop().await;
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_alpn_four_preserves_single_files_and_rejects_bundles() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = start(dir.path(), Duration::from_secs(10)).await;
+    let (mut tls, _, c) = raw_connected_version(&s, true).await;
+    assert!(!c.supports_bundles);
+    let folder = dir.path().join("empty");
+    std::fs::create_dir(&folder).unwrap();
+    assert_eq!(
+        s.send_bundle(&c.id, BundleSource::folder(&folder).await.unwrap()),
+        Err(Error::Protocol)
+    );
+    let id = raw_offer(&s, &c.id, &mut tls, 3).await;
+    protocol::send(
+        &mut tls,
+        &Message::FileChunk {
+            id: id.clone(),
+            data: b"abc".to_vec(),
+        },
+    )
+    .await
+    .unwrap();
+    protocol::send(
+        &mut tls,
+        &Message::FileFinish {
+            id,
+            hash: blake3::hash(b"abc").to_hex().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        raw_message(&mut tls).await,
+        Message::FileComplete { .. }
+    ));
+    let received = file_status(&s, &c.id, "complete").await;
+    assert_eq!(std::fs::read(received.path.unwrap()).unwrap(), b"abc");
+    let path = dir.path().join("back.txt");
+    std::fs::write(&path, b"back").unwrap();
+    s.send_file(&c.id, Source::open(&path).await.unwrap())
+        .unwrap();
+    let id = match raw_message(&mut tls).await {
+        Message::FileOffer { id, size: 4, .. } => id,
+        _ => panic!("Expected legacy file"),
+    };
+    protocol::send(
+        &mut tls,
+        &Message::FileAccept {
+            id: id.clone(),
+            accept: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(raw_message(&mut tls).await,Message::FileChunk{data,..} if data==b"back"));
+    assert!(matches!(
+        raw_message(&mut tls).await,
+        Message::FileFinish { .. }
+    ));
+    protocol::send(&mut tls, &Message::FileComplete { id })
+        .await
+        .unwrap();
+    file_status(&s, &c.id, "complete").await;
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_progress_across_file_boundaries_is_exact_and_monotonic() {
+    use super::super::bundle::{Entry, Kind};
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let capture = events.clone();
+    let s = start_observed(
+        dir.path(),
+        Duration::from_secs(10),
+        &random::<32>().unwrap(),
+        Arc::new(move |snapshot| lock(&capture).push(snapshot)),
+    )
+    .await;
+    let (mut tls, _, c) = raw_connected(&s).await;
+    let chunk = vec![7; files::CHUNK_SIZE];
+    let count = 12;
+    let manifest = Manifest {
+        name: "Progress".into(),
+        total: (chunk.len() * count * 2) as u64,
+        entries: vec![
+            Entry {
+                path: "a".into(),
+                kind: Kind::File,
+                size: (chunk.len() * count) as u64,
+            },
+            Entry {
+                path: "b".into(),
+                kind: Kind::File,
+                size: (chunk.len() * count) as u64,
+            },
+            Entry {
+                path: "zero".into(),
+                kind: Kind::File,
+                size: 0,
+            },
+        ],
+    };
+    let total = manifest.total;
+    let id = raw_bundle_offer(&s, &c.id, &mut tls, manifest).await;
+    accept_bundle(&s, &c.id, &mut tls, &id).await;
+    let mut hash = blake3::Hasher::new();
+    for _ in 0..count {
+        hash.update(&chunk);
+    }
+    for index in 0..3 {
+        if index < 2 {
+            for chunk_index in 0..count {
+                protocol::send(
+                    &mut tls,
+                    &Message::FileChunk {
+                        id: id.clone(),
+                        data: chunk.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+                if chunk_index == 0 {
+                    // Hold the next file until a real UI sample includes its
+                    // first chunk; avoid relying on hosted-runner scheduling.
+                    let wanted = (index as u64 * count as u64 + 1) * chunk.len() as u64;
+                    timeout(Duration::from_secs(5), async {
+                        loop {
+                            let sampled = lock(&events)
+                                .iter()
+                                .flat_map(|s| s.connections.iter())
+                                .filter(|e| e.id == c.id)
+                                .filter_map(|e| e.transfer.as_ref())
+                                .any(|t| t.transferred == wanted);
+                            if sampled {
+                                break;
+                            }
+                            sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                }
+                sleep(Duration::from_millis(35)).await;
+            }
+        }
+        protocol::send(
+            &mut tls,
+            &Message::BundleFileEnd {
+                id: id.clone(),
+                index,
+                hash: if index < 2 {
+                    hash.finalize().to_hex().to_string()
+                } else {
+                    blake3::hash(b"").to_hex().to_string()
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+    protocol::send(&mut tls, &Message::BundleEnd { id })
+        .await
+        .unwrap();
+    assert!(matches!(
+        raw_message(&mut tls).await,
+        Message::FileComplete { .. }
+    ));
+    let result = file_status(&s, &c.id, "complete").await;
+    assert_eq!(result.transferred, total);
+    {
+        let captured = lock(&events);
+        let counts: Vec<_> = captured
+            .iter()
+            .flat_map(|s| s.connections.iter())
+            .filter(|e| e.id == c.id)
+            .filter_map(|e| e.transfer.as_ref())
+            .map(|t| t.transferred)
+            .collect();
+        assert!(counts.windows(2).all(|w| w[0] <= w[1]));
+        assert!(counts.iter().any(|n| *n > 0 && *n < total / 2));
+        assert!(counts.iter().any(|n| *n > total / 2 && *n < total));
+    }
+    s.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sparse_file_over_four_gib_streams_over_real_tls_with_exact_u64_progress() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = start(dir.path(), Duration::from_secs(10)).await;
+    let (mut tls, _, c) = raw_connected(&s).await;
+    let path = dir.path().join("large.bin");
+    let file = std::fs::File::create(&path).unwrap();
+    let size = 4 * 1024 * 1024 * 1024u64 + 17;
+    file.set_len(size).unwrap();
+    assert!(file.metadata().unwrap().blocks() * 512 < size / 100);
+    drop(file);
+    s.send_file(&c.id, Source::open(&path).await.unwrap())
+        .unwrap();
+    let id = match raw_message(&mut tls).await {
+        Message::FileOffer {
+            id, size: declared, ..
+        } => {
+            assert_eq!(declared, size);
+            id
+        }
+        _ => panic!("Expected large file offer"),
+    };
+    protocol::send(
+        &mut tls,
+        &Message::FileAccept {
+            id: id.clone(),
+            accept: true,
+        },
+    )
+    .await
+    .unwrap();
+    let (count, hash) = timeout(Duration::from_secs(180), async {
+        let mut count = 0u64;
+        let mut digest = blake3::Hasher::new();
+        loop {
+            match raw_message(&mut tls).await {
+                Message::FileChunk { data, .. } => {
+                    assert!(!data.is_empty() && data.len() <= files::CHUNK_SIZE);
+                    count += data.len() as u64;
+                    digest.update(&data);
+                }
+                Message::FileFinish { hash, .. } => {
+                    assert_eq!(digest.finalize().to_hex().as_str(), hash);
+                    break (count, hash);
+                }
+                _ => panic!("Unexpected transfer message"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(count, size);
+    assert!(count > u32::MAX as u64);
+    assert_eq!(hash.len(), 64);
+    protocol::send(&mut tls, &Message::FileComplete { id })
+        .await
+        .unwrap();
+    let complete = file_status(&s, &c.id, "complete").await;
+    assert_eq!(complete.transferred, size);
     s.stop().await;
 }

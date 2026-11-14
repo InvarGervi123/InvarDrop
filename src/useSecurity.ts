@@ -3,11 +3,11 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export interface SecureConnection {
   id: string; phase: string; peer: string | null; code: string | null;
-  localApproved: boolean; canReconnect: boolean; error: string | null;
+  supportsBundles: boolean; localApproved: boolean; canReconnect: boolean; error: string | null;
   transfer: FileTransfer | null;
 }
 export interface FileTransfer {
-  id: string; direction: "outgoing" | "incoming"; name: string; size: number;
+  id: string; direction: "outgoing" | "incoming"; name: string; size: number; fileCount: number; isFolder: boolean;
   senderName: string | null; transferred: number; bytesPerSecond: number | null; etaSeconds: number | null; status: string; path: string | null; error: string | null;
 }
 export interface SecuritySnapshot {

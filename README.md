@@ -6,7 +6,7 @@ discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 2.5 (feature branch)
+## Current status — milestone 2.6 (feature branch)
 
 Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
 appear and disappear in the React UI without refresh. Each run advertises a
@@ -21,18 +21,24 @@ trust state. Linux needs an available, unlocked Secret Service; Windows uses
 Credential Manager. Storage failure disables secure connections without a plaintext
 fallback.
 
-Trusted devices can send one ordinary file at a time over their existing TLS
-connection. The sender selects a file with a native dialog; the receiver must
-accept each offer. Files stream in bounded 64 KiB chunks, with incremental BLAKE3
+Trusted devices can send a file, multiple files or a complete nested folder over
+their existing TLS connection. Native dialogs select files or a folder; the receiver
+explicitly approves the name, file count and total size of each operation.
+Empty directories and zero-byte files are supported, with a 1 TiB total limit,
+4096 entries and depth 16. Files stream in bounded 64 KiB chunks, with incremental BLAKE3
 verification before finalization. Received files go to a private, separate receipt
 directory under the profile's `received` folder; the UI shows the local path.
 Existing files are never replaced. File names and destinations cannot be supplied
 as arbitrary filesystem paths through IPC or by the peer.
 
-Both devices need milestone 2.5: ALPN `invardrop/4` and hello version 4 intentionally
-reject old transport versions; stored identities and trust remain compatible.
-Folder transfer, resume, conversion/FFmpeg, extraction and OS
-sharing integration are **not implemented**. Discovery remains unauthenticated.
+Milestone 2.6 uses ALPN `invardrop/5` and negotiates `invardrop/4` for compatibility
+with Milestone 2.5 single files up to 4 GiB. Identities and trust remain compatible.
+Folders are staged privately and published together only after every BLAKE3 check.
+Resume, compression, conversion/FFmpeg, extraction and OS sharing integration
+are **not implemented**. Discovery remains unauthenticated.
+
+See [large files and folders (Russian)](docs/large-files-folders.md) for the current
+protocol, limits, path validation, atomic publication and cancellation guarantees.
 
 See [discovery architecture and testing (Russian)](docs/discovery.md) for protocol,
 privacy decisions, expiration/retry behavior, manual tests and limitations.
