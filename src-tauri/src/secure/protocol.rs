@@ -21,6 +21,7 @@ pub enum Message {
     Ping {},
     Pong {},
     FileOffer {
+        sender_name: String,
         id: String,
         name: String,
         size: u64,

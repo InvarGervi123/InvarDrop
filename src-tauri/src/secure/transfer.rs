@@ -83,7 +83,14 @@ fn begin_finalization(s: &Shared, connection: &str, id: &str) -> Result<()> {
 fn valid_id(id: &str) -> bool {
     uuid::Uuid::parse_str(id).is_ok_and(|value| value.to_string() == id)
 }
-fn reserve_offer(s: &Shared, connection: &str, id: &str, name: &str, size: u64) -> Result<bool> {
+fn reserve_offer(
+    s: &Shared,
+    connection: &str,
+    id: &str,
+    name: &str,
+    size: u64,
+    sender: &str,
+) -> Result<bool> {
     transaction(s, |state| {
         let entry = state
             .entries
@@ -98,10 +105,12 @@ fn reserve_offer(s: &Shared, connection: &str, id: &str, name: &str, size: u64) 
         {
             return Ok(false);
         }
+        entry.approval_deadline = Some(Instant::now() + s.file_approval_duration);
         entry.view.transfer = Some(TransferView {
             id: id.into(),
             direction: "incoming".into(),
             name: name.into(),
+            sender_name: Some(sender.into()),
             size,
             status: "awaiting_approval".into(),
             path: None,
@@ -143,7 +152,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
         tokio::select! {
             _=tick.tick()=>protocol::send(writer,&Message::Ping{}).await?,
             _=tokio::time::sleep_until((last_received+Duration::from_secs(20)).into())=>return Err(Error::Expired),
-            _=tokio::time::sleep_until(deadline.unwrap_or_else(|| Instant::now()+FILE_APPROVAL).into()), if deadline.is_some()=>return Err(Error::Expired),
+            _=tokio::time::sleep_until(deadline.unwrap_or_else(|| Instant::now()+s.file_approval_duration).into()), if deadline.is_some()=>return Err(Error::Expired),
             // Select readiness, then await a whole read/write. Selecting directly
             // on next_chunk would let keepalives cancel a partially completed read.
             _=std::future::ready(()), if sending=>{
@@ -167,9 +176,10 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                 match action.ok_or(Error::Cancelled)? {
                     Action::SendFile{id,source}=>{
                         if !matches!(transfer,Transfer::Idle) {return Err(Error::Protocol);}
-                        protocol::send(writer,&Message::FileOffer{id:id.clone(),name:source.name.clone(),size:source.size}).await?;
+                        let sender_name = lock(&s.local_name).clone();
+                        protocol::send(writer,&Message::FileOffer{id:id.clone(),name:source.name.clone(),size:source.size,sender_name}).await?;
                         transfer_view(s,connection,&id,"awaiting_approval");
-                        transfer=Transfer::AwaitAccept{id,source:*source,deadline:Instant::now()+FILE_APPROVAL};
+                        transfer=Transfer::AwaitAccept{id,source:*source,deadline:Instant::now()+s.file_approval_duration};
                     }
                     Action::ReceiveFile{id,accept}=>{
                         let previous=std::mem::replace(&mut transfer,Transfer::Idle);
@@ -200,7 +210,8 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                 match message {
                     Message::Ping{}=>protocol::send(writer,&Message::Pong{}).await?,
                     Message::Pong{}=>{},
-                    Message::FileOffer{id,name,size}=>{
+                    Message::FileOffer{id,name,size,sender_name}=>{
+                        validate_sender(&sender_name)?;
                         if !valid_id(&id){return Err(Error::Protocol);}
                         if seen_offers.contains(&id){return Err(Error::Protocol);}
                         if seen_offers.len()>=128{return Err(Error::Limit);}
@@ -209,10 +220,10 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         if size>files::MAX_FILE_SIZE{return Err(Error::Limit);}
                         if offer_window.elapsed()>=Duration::from_secs(60){offer_window=Instant::now();offers=0;}
                         offers+=1;if offers>30{return Err(Error::Limit);}
-                        if !matches!(transfer,Transfer::Idle)||!reserve_offer(s,connection,&id,&name,size)? {
+                        if !matches!(transfer,Transfer::Idle)||!reserve_offer(s,connection,&id,&name,size,&sender_name)? {
                             protocol::send(writer,&Message::FileAccept{id,accept:false}).await?;
                         }else{
-                            transfer=Transfer::IncomingOffer{id,name,size,deadline:Instant::now()+FILE_APPROVAL};
+                            transfer=Transfer::IncomingOffer{id,name,size,deadline:Instant::now()+s.file_approval_duration};
                         }
                     }
                     Message::FileAccept{id,accept}=>{
@@ -267,4 +278,17 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
             }
         }
     }
+}
+
+fn validate_sender(name: &str) -> Result<()> {
+    if name.trim().is_empty()
+        || name.len() > 80
+        || name.chars().any(|c| {
+            c.is_control()
+                || matches!(c as u32, 0x061c | 0x200e..=0x200f | 0x202a..=0x202e | 0x2066..=0x2069)
+        })
+    {
+        return Err(Error::Protocol);
+    }
+    Ok(())
 }

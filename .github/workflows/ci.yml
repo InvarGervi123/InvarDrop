@@ -42,6 +42,8 @@ jobs:
       - run: npm ci
       - name: Type-check frontend
         run: npm run check
+      - name: Test receiver UI
+        run: npm test
       - name: Check Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - name: Build desktop executable
