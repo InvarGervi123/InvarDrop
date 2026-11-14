@@ -35,5 +35,7 @@ pub enum Error {
     Integrity,
     #[error("Source file changed during transfer")]
     FileChanged,
+    #[error("Verified file publication has started; cancellation is no longer available")]
+    CommitStarted,
 }
 pub type Result<T> = std::result::Result<T, Error>;

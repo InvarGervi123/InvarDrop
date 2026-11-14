@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { FileTransfer, formatBytes } from "./FileTransfer";
+import { FileTransfer, formatBytes, progressPercent } from "./FileTransfer";
 import type { SecureConnection } from "./useSecurity";
 afterEach(cleanup);
 const connection = (status = "awaiting_approval", id = "one"): SecureConnection => ({
   id: "connection", phase: "connected", peer: "abc", code: null, localApproved: true, canReconnect: false, error: null,
-  transfer: { id, name: "photo.png", senderName: "InvarDrop sender", size: 1536, direction: "incoming", status, path: null, error: null },
+  transfer: { id, name: "photo.png", senderName: "InvarDrop sender", size: 1536, direction: "incoming", transferred: 0, bytesPerSecond: null, etaSeconds: null, status, path: null, error: null },
 });
 it("renders sender, filename and readable size as text", () => {
   render(<FileTransfer connection={connection()} operate={vi.fn()} />);
@@ -46,7 +46,7 @@ it("does not reuse confirmation for a new request", () => {
   expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
   fireEvent.click(screen.getByText("Accept file")); expect(operate).not.toHaveBeenCalled();
 });
-describe.each([["receiving", "Accepted · receiving file…"], ["rejected", "Declined"], ["expired", "Request expired"], ["complete", "Completed · BLAKE3 verified"], ["error", "Transfer failed"]])("state %s", (status, label) => {
+describe.each([["receiving", "Transferring · receiving file…"], ["rejected", "Declined"], ["expired", "Request expired"], ["complete", "Completed · BLAKE3 verified"], ["error", "Transfer failed"]])("state %s", (status, label) => {
   it("shows state and removes approval controls", () => {
     render(<FileTransfer connection={connection(status)} operate={vi.fn()} />);
     expect(screen.getByRole("status").textContent).toBe(label);
@@ -65,4 +65,35 @@ it("never offers acceptance on a closed connection", () => {
   render(<FileTransfer connection={c} operate={vi.fn()} />);
   expect(screen.queryByText("Accept file")).toBeNull();
   expect(screen.queryByRole("checkbox")).toBeNull();
+});
+
+it("shows measured progress, speed and reliable ETA", () => {
+  const c=connection("receiving"); c.transfer!.transferred=768; c.transfer!.bytesPerSecond=2*1024**2; c.transfer!.etaSeconds=4;
+  render(<FileTransfer connection={c} operate={vi.fn()} />);
+  expect((screen.getByRole("progressbar") as HTMLProgressElement).value).toBe(50);
+  expect(screen.getByText("50% · 768 B / 1.5 KiB")).toBeTruthy();
+  expect(screen.getByText(/2.00 MiB\/s/)).toBeTruthy(); expect(screen.getByText(/ETA ~4 s/)).toBeTruthy();
+});
+it("handles zero-byte progress and does not invent an ETA", () => {
+  const c=connection("receiving"); c.transfer!.size=0;
+  expect(progressPercent(c.transfer!)).toBe(0); c.transfer!.status="complete"; expect(progressPercent(c.transfer!)).toBe(100);
+  render(<FileTransfer connection={c} operate={vi.fn()} />); expect(screen.queryByText(/ETA/)).toBeNull();
+});
+it.each(["incoming","outgoing"] as const)("cancels %s transfer only once", async direction => {
+  const c=connection("receiving"); c.transfer!.direction=direction;
+  const operate=vi.fn().mockResolvedValue(true);
+  render(<FileTransfer connection={c} operate={operate} />);
+  fireEvent.click(screen.getByText("Cancel transfer"));
+  await waitFor(()=>expect(operate).toHaveBeenCalledWith("file_cancel",{id:"connection",transferId:"one"}));
+  fireEvent.click(screen.getByText("Cancel transfer")); expect(operate).toHaveBeenCalledTimes(1);
+});
+it.each(["cancelling","cancelled","committing","complete","error"])("does not offer another cancellation in %s", status=>{
+  render(<FileTransfer connection={connection(status)} operate={vi.fn()} />);
+  const button=screen.queryByText("Cancel transfer") as HTMLButtonElement|null;
+  expect(button===null || button.disabled).toBe(true);
+});
+it("progress is monotonic across actual byte samples",()=>{
+  const t=connection().transfer!; let previous=0;
+  for(const n of [0,1,512,1024,1536]) {t.transferred=n;const p=progressPercent(t);expect(p).toBeGreaterThanOrEqual(previous);expect(p).toBeLessThanOrEqual(100);previous=p;}
+  expect(previous).toBe(100);
 });

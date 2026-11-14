@@ -6,7 +6,7 @@ discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 2.4 (feature branch)
+## Current status — milestone 2.5 (feature branch)
 
 Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
 appear and disappear in the React UI without refresh. Each run advertises a
@@ -29,9 +29,9 @@ directory under the profile's `received` folder; the UI shows the local path.
 Existing files are never replaced. File names and destinations cannot be supplied
 as arbitrary filesystem paths through IPC or by the peer.
 
-Both devices need milestone 2.4: ALPN `invardrop/3` and hello version 3 intentionally
+Both devices need milestone 2.5: ALPN `invardrop/4` and hello version 4 intentionally
 reject old transport versions; stored identities and trust remain compatible.
-Folder transfer, resume, advanced progress, conversion/FFmpeg, extraction and OS
+Folder transfer, resume, conversion/FFmpeg, extraction and OS
 sharing integration are **not implemented**. Discovery remains unauthenticated.
 
 See [discovery architecture and testing (Russian)](docs/discovery.md) for protocol,
@@ -47,6 +47,11 @@ Original files must never be modified by future preparation features.
 Incoming requests show the device-reported sender name, readable size and explicit
 Accept/Decline states. Acceptance requires confirming the specific file; expired
 requests cannot be approved. See [receiver acceptance (Russian)](docs/receiver-acceptance.md).
+
+Transfers display measured bytes, data percentage, MiB/s and ETA when reliable,
+with a Cancel action on both sides. A cancelled transfer closes the TLS session.
+See [progress and cancellation (Russian)](docs/transfer-progress.md) for finalization
+races, testing and limitations.
 
 ## Development
 

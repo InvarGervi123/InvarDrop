@@ -64,8 +64,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Deliberately exclude pairing code and file contents.
                     println!(
                         "{}",
-                        serde_json::json!({"phase":c.phase,"transfer":c.transfer.as_ref().map(|t| &t.status)})
+                        serde_json::json!({"phase":c.phase,"transfer":c.transfer.as_ref().map(|t| &t.status),"bytes":c.transfer.as_ref().map(|t|t.transferred),"total":c.transfer.as_ref().map(|t|t.size)})
                     );
+                }
+                "cancel" => {
+                    let snapshot = service.snapshot();
+                    let transfer = snapshot
+                        .connections
+                        .iter()
+                        .find(|c| c.id == id)
+                        .and_then(|c| c.transfer.as_ref())
+                        .ok_or("No transfer")?;
+                    service.cancel_file(&id, &transfer.id)?;
+                    println!("cancel requested");
                 }
                 "send" => {
                     let source = tauri::async_runtime::block_on(Source::open(

@@ -8,7 +8,7 @@ export interface SecureConnection {
 }
 export interface FileTransfer {
   id: string; direction: "outgoing" | "incoming"; name: string; size: number;
-  senderName: string | null; status: string; path: string | null; error: string | null;
+  senderName: string | null; transferred: number; bytesPerSecond: number | null; etaSeconds: number | null; status: string; path: string | null; error: string | null;
 }
 export interface SecuritySnapshot {
   revision: number; status: string; identity: string | null;

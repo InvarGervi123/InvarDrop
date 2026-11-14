@@ -56,7 +56,14 @@ fn transfer_view(s: &Shared, connection: &str, id: &str, status: &str) {
         if let Some(transfer) = &mut entry.view.transfer
             && transfer.id == id
         {
+            if entry.file_cancelled {
+                return;
+            }
             transfer.status = status.into();
+            if !matches!(status, "sending" | "receiving") {
+                transfer.bytes_per_second = None;
+                transfer.eta_seconds = None;
+            }
         }
     });
 }
@@ -76,7 +83,10 @@ fn begin_finalization(s: &Shared, connection: &str, id: &str) -> Result<()> {
         if transfer.id != id || transfer.direction != "incoming" || transfer.status != "receiving" {
             return Err(Error::Protocol);
         }
+        entry.finish_running = true;
         transfer.status = "finalizing".into();
+        transfer.bytes_per_second = None;
+        transfer.eta_seconds = None;
         Ok(())
     })
 }
@@ -105,6 +115,10 @@ fn reserve_offer(
         {
             return Ok(false);
         }
+        entry.gate = Arc::new(CommitGate::default());
+        entry.file_cancelled = false;
+        entry.cancel_notice = None;
+        entry.meter = None;
         entry.approval_deadline = Some(Instant::now() + s.file_approval_duration);
         entry.view.transfer = Some(TransferView {
             id: id.into(),
@@ -112,6 +126,9 @@ fn reserve_offer(
             name: name.into(),
             sender_name: Some(sender.into()),
             size,
+            transferred: 0,
+            bytes_per_second: None,
+            eta_seconds: None,
             status: "awaiting_approval".into(),
             path: None,
             error: None,
@@ -128,6 +145,21 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
     messages: &mut mpsc::Receiver<Result<Message>>,
     mut actions: mpsc::Receiver<Action>,
 ) -> Result<()> {
+    let (idle, wake) = {
+        let state = lock(&s.state);
+        let entry = state
+            .entries
+            .iter()
+            .find(|e| e.view.id == connection)
+            .ok_or(Error::NotReady)?;
+        (entry.frame_idle.clone(), entry.progress_wake.clone())
+    };
+    let mut framed = TrackedWriter { writer, idle };
+    let _progress_task = AbortTask(tokio::spawn(progress::run(
+        s.clone(),
+        connection.to_owned(),
+        wake,
+    )));
     let store = get_store(s)?;
     let mut transfer = Transfer::Idle;
     let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -150,7 +182,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
         let sending = matches!(transfer, Transfer::Sending { .. });
         let deadline = transfer.deadline();
         tokio::select! {
-            _=tick.tick()=>protocol::send(writer,&Message::Ping{}).await?,
+            _=tick.tick()=>framed.send(&Message::Ping{}).await?,
             _=tokio::time::sleep_until((last_received+Duration::from_secs(20)).into())=>return Err(Error::Expired),
             _=tokio::time::sleep_until(deadline.unwrap_or_else(|| Instant::now()+s.file_approval_duration).into()), if deadline.is_some()=>return Err(Error::Expired),
             // Select readiness, then await a whole read/write. Selecting directly
@@ -159,13 +191,15 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                 let Transfer::Sending { id, source, deadline } = &mut transfer else { unreachable!() };
                 match timeout(FILE_ACTIVITY, source.next_chunk()).await.map_err(|_|Error::Expired)?? {
                     Some(data)=>{
-                        protocol::send(writer,&Message::FileChunk{id:id.clone(),data}).await?;
+                        let count = data.len();
+                        framed.send(&Message::FileChunk{id:id.clone(),data}).await?;
+                        progress::record(s, connection, count);
                         *deadline=Instant::now()+FILE_ACTIVITY;
                     }
                     None=>{
                         let id=id.clone();
                         let hash=source.digest();
-                        protocol::send(writer,&Message::FileFinish{id:id.clone(),hash}).await?;
+                        framed.send(&Message::FileFinish{id:id.clone(),hash}).await?;
                         transfer_view(s,connection,&id,"finalizing");
                         transfer=Transfer::AwaitComplete{id,deadline:Instant::now()+FILE_ACTIVITY};
                     }
@@ -177,7 +211,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                     Action::SendFile{id,source}=>{
                         if !matches!(transfer,Transfer::Idle) {return Err(Error::Protocol);}
                         let sender_name = lock(&s.local_name).clone();
-                        protocol::send(writer,&Message::FileOffer{id:id.clone(),name:source.name.clone(),size:source.size,sender_name}).await?;
+                        framed.send(&Message::FileOffer{id:id.clone(),name:source.name.clone(),size:source.size,sender_name}).await?;
                         transfer_view(s,connection,&id,"awaiting_approval");
                         transfer=Transfer::AwaitAccept{id,source:*source,deadline:Instant::now()+s.file_approval_duration};
                     }
@@ -187,11 +221,12 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         if id!=offered {return Err(Error::Protocol);}
                         if accept {
                             let sink=timeout(FILE_ACTIVITY,Sink::create(&s.receive_directory,&name,size)).await.map_err(|_|Error::Expired)??;
-                            protocol::send(writer,&Message::FileAccept{id:id.clone(),accept:true}).await?;
+                            framed.send(&Message::FileAccept{id:id.clone(),accept:true}).await?;
                             transfer_view(s,connection,&id,"receiving");
+                            progress::begin(s, connection);
                             transfer=Transfer::Receiving{id,sink,deadline:Instant::now()+FILE_ACTIVITY};
                         }else{
-                            protocol::send(writer,&Message::FileAccept{id:id.clone(),accept:false}).await?;
+                            framed.send(&Message::FileAccept{id:id.clone(),accept:false}).await?;
                             transfer_view(s,connection,&id,"rejected");
                         }
                     }
@@ -208,7 +243,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                     controls+=1;if controls>64{return Err(Error::Limit);}
                 }
                 match message {
-                    Message::Ping{}=>protocol::send(writer,&Message::Pong{}).await?,
+                    Message::Ping{}=>framed.send(&Message::Pong{}).await?,
                     Message::Pong{}=>{},
                     Message::FileOffer{id,name,size,sender_name}=>{
                         validate_sender(&sender_name)?;
@@ -221,7 +256,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         if offer_window.elapsed()>=Duration::from_secs(60){offer_window=Instant::now();offers=0;}
                         offers+=1;if offers>30{return Err(Error::Limit);}
                         if !matches!(transfer,Transfer::Idle)||!reserve_offer(s,connection,&id,&name,size,&sender_name)? {
-                            protocol::send(writer,&Message::FileAccept{id,accept:false}).await?;
+                            framed.send(&Message::FileAccept{id,accept:false}).await?;
                         }else{
                             transfer=Transfer::IncomingOffer{id,name,size,deadline:Instant::now()+s.file_approval_duration};
                         }
@@ -232,6 +267,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         if id!=offered{return Err(Error::Protocol);}
                         if accept {
                             transfer_view(s,connection,&id,"sending");
+                            progress::begin(s, connection);
                             transfer=Transfer::Sending{id,source,deadline:Instant::now()+FILE_ACTIVITY};
                         }else{
                             transfer_view(s,connection,&id,"rejected");
@@ -241,6 +277,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         let Transfer::Receiving{id:expected,sink,deadline}=&mut transfer else{return Err(Error::Protocol);};
                         if &id!=expected{return Err(Error::Protocol);}
                         timeout(FILE_ACTIVITY,sink.write(&data)).await.map_err(|_|Error::Expired)??;
+                        progress::record(s, connection, data.len());
                         *deadline=Instant::now()+FILE_ACTIVITY;
                     }
                     Message::FileFinish{id,hash}=>{
@@ -252,20 +289,30 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         let shared=s.clone();let cid=connection.to_owned();let finished=id.clone();
                         // A verified filesystem commit may outlive cancellation.
                         // Its owner always publishes the actual completion/error.
+                        let gate = {
+                            let state=lock(&s.state);
+                            state.entries.iter().find(|e|e.view.id==connection).ok_or(Error::NotReady)?.gate.clone()
+                        };
+                        let (done, result) = tokio::sync::oneshot::channel();
                         let finalize=tokio::spawn(async move {
-                            let result=sink.finish(&hash).await;
+                            let committing_shared=shared.clone(); let committing_cid=cid.clone(); let committing_id=finished.clone();
+                            let result=sink.finish_cancellable(&hash, gate, move || transfer_view(&committing_shared,&committing_cid,&committing_id,"committing")).await;
                             view(&shared,&cid,|entry|{
+                                entry.finish_running=false;
                                 if let Some(transfer)=&mut entry.view.transfer && transfer.id==finished {
+                                    transfer.bytes_per_second=None; transfer.eta_seconds=None;
                                     match &result {
                                         Ok(path)=>{transfer.status="complete".into();transfer.path=Some(path.to_string_lossy().into_owned());transfer.error=None;}
-                                        Err(error)=>{transfer.status="error".into();transfer.error=Some(error.to_string());}
+                                        Err(_) if entry.file_cancelled=>{transfer.status="cancelled".into();transfer.error=None;}
+                                        Err(error)=>{transfer.status="error".into();transfer.error=entry.transport_error.clone().or_else(||Some(error.to_string()));}
                                     }
                                 }
                             });
-                            result
+                            let _=done.send(result);
                         });
-                        finalize.await.map_err(|_|Error::FileIo)??;
-                        protocol::send(writer,&Message::FileComplete{id}).await?;
+                        lock(&s.tasks).push(finalize);
+                        result.await.map_err(|_|Error::FileIo)??;
+                        framed.send(&Message::FileComplete{id}).await?;
                     }
                     Message::FileComplete{id}=>{
                         let Transfer::AwaitComplete{id:expected,..}=&transfer else{return Err(Error::Protocol);};
@@ -291,4 +338,19 @@ fn validate_sender(name: &str) -> Result<()> {
         return Err(Error::Protocol);
     }
     Ok(())
+}
+
+struct TrackedWriter<'a, W> {
+    writer: &'a mut W,
+    idle: Arc<std::sync::atomic::AtomicBool>,
+}
+impl<W: tokio::io::AsyncWrite + Unpin> TrackedWriter<'_, W> {
+    async fn send(&mut self, message: &Message) -> Result<()> {
+        self.idle.store(false, Ordering::SeqCst);
+        let result = protocol::send(self.writer, message).await;
+        if result.is_ok() {
+            self.idle.store(true, Ordering::SeqCst);
+        }
+        result
+    }
 }

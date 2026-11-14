@@ -98,6 +98,17 @@ async fn file_respond(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn file_cancel(
+    id: String,
+    transfer_id: String,
+    service: tauri::State<'_, secure::Service>,
+) -> Result<(), String> {
+    service
+        .cancel_file(&id, &transfer_id)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -132,7 +143,8 @@ pub fn run() {
             secure_revoke,
             secure_unblock,
             file_choose,
-            file_respond
+            file_respond,
+            file_cancel
         ])
         .build(tauri::generate_context!())
         .expect("error while building InvarDrop");
