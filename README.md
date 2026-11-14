@@ -6,7 +6,7 @@ discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 2.6 (feature branch)
+## Current status — milestone 2.7 (feature branch)
 
 Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
 appear and disappear in the React UI without refresh. Each run advertises a
@@ -31,20 +31,33 @@ directory under the profile's `received` folder; the UI shows the local path.
 Existing files are never replaced. File names and destinations cannot be supplied
 as arbitrary filesystem paths through IPC or by the peer.
 
-Milestone 2.6 uses ALPN `invardrop/5` and negotiates `invardrop/4` for compatibility
-with Milestone 2.5 single files up to 4 GiB. Identities and trust remain compatible.
-Folders are staged privately and published together only after every BLAKE3 check.
-Resume, compression, conversion/FFmpeg, extraction and OS sharing integration
-are **not implemented**. Discovery remains unauthenticated.
+Milestone 2.7 uses ALPN `invardrop/6` for resumable transfers. It also negotiates
+`invardrop/5` for ordinary 2.6 file/folder transfers and `invardrop/4` for 2.5 single
+files up to 4 GiB. Identities and trust remain compatible. Discovery remains
+unauthenticated.
 
-See [large files and folders (Russian)](docs/large-files-folders.md) for the current
-protocol, limits, path validation, atomic publication and cancellation guarantees.
+Interrupted version 6 transfers preserve verified prefixes in private staging,
+with authenticated restart checkpoints every 16 MiB and at each file boundary.
+Trusted reconnect exposes Resume and Discard controls; it never starts payload
+automatically. Resume requires sender action and fresh receiver approval. Every
+source and saved prefix is rehashed before reuse, and the whole verified result
+is published without replacing an existing destination. Cancel removes incomplete
+data and resets the position; Discard removes the dormant recovery record.
+Revoking trust invalidates old checkpoints. Limits: 8 recovery records, 2 TiB total
+declared size, and 7 days of inactivity. Source and staging verification can require
+substantial disk IO; resume avoids retransmitting verified data, not rereading it.
+
+Compression, conversion/FFmpeg, extraction and OS sharing integration are
+**not implemented**. See [resumable transfers (Russian)](docs/resumable-transfers.md)
+for consent, encrypted metadata, recovery, cleanup, limits and security considerations.
+See [large files and folders (Russian)](docs/large-files-folders.md) for the 2.6
+protocol and storage foundations.
 
 See [discovery architecture and testing (Russian)](docs/discovery.md) for protocol,
 privacy decisions, expiration/retry behavior, manual tests and limitations.
 See [secure pairing and threat model (Russian)](docs/security.md) for the pairing
 transport protocol, storage policy, approval boundaries and validation results.
-See [single-file transfer (Russian)](docs/transfers.md) for the current wire format,
+See [single-file transfer (Russian)](docs/transfers.md) for the initial wire format,
 safe storage, cancellation boundaries, tests and limitations.
 
 The intended product has no accounts, cloud services, advertisements or paid APIs.

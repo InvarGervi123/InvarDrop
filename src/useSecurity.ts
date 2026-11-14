@@ -3,17 +3,21 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export interface SecureConnection {
   id: string; phase: string; peer: string | null; code: string | null;
-  supportsBundles: boolean; localApproved: boolean; canReconnect: boolean; error: string | null;
+  supportsResume: boolean; supportsBundles: boolean; localApproved: boolean; canReconnect: boolean; error: string | null;
   transfer: FileTransfer | null;
 }
 export interface FileTransfer {
-  id: string; direction: "outgoing" | "incoming"; name: string; size: number; fileCount: number; isFolder: boolean;
+  id: string; direction: "outgoing" | "incoming"; resuming: boolean; name: string; size: number; fileCount: number; isFolder: boolean;
   senderName: string | null; transferred: number; bytesPerSecond: number | null; etaSeconds: number | null; status: string; path: string | null; error: string | null;
+}
+export interface ResumeView {
+  id: string; peer: string; name: string; size: number; verified: number;
+  fileCount: number; isFolder: boolean; direction: "outgoing" | "incoming"; requested: boolean; completed?: boolean;
 }
 export interface SecuritySnapshot {
   revision: number; status: string; identity: string | null;
   trusted: string[]; revoked: string[]; connections: SecureConnection[]; error: string | null;
-  receiveDirectory: string;
+  receiveDirectory: string; resumable: ResumeView[];
 }
 export function useSecurity() {
   const [snapshot, setSnapshot] = useState<SecuritySnapshot | null>(null);

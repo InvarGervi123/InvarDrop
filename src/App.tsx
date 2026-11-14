@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 import { useDiscovery } from "./useDiscovery";
 import { useSecurity } from "./useSecurity";
+import { ResumeTransfers } from "./ResumeTransfers";
 import { PairCard } from "./PairCard";
 
 function App() {
@@ -26,6 +27,7 @@ function App() {
       <header><span className="mark" aria-hidden="true">↓</span><h1>InvarDrop</h1><p>File sharing. Close to home.</p></header>
       <div className="workspace">
         {visibleConnections.map(c => <PairCard key={c.id} connection={c} operate={operate} />)}
+        {security && <ResumeTransfers snapshot={security} operate={operate} />}
         <section aria-labelledby="devices-title" className="empty-state">
           <span className="status" role="status">{unavailable ? "Discovery unavailable" : snapshot?.status === "searching" ? "Looking nearby" : "Starting discovery"}</span>
           <h2 id="devices-title">Nearby devices</h2>
@@ -48,7 +50,7 @@ function App() {
           {security.revoked.length > 0 && <><p>Revoked keys. Allowing pairing again does not restore trust.</p><ul>{security.revoked.map(id => <li key={id}><span>{id.slice(0, 16)}</span><button type="button" className="secondary" disabled={busy} onClick={() => void operate("secure_unblock", { id })}>Allow new pairing</button></li>)}</ul></>}
         </details>}
       </div>
-      <footer><p>Trusted devices · Single-file transfer</p><p>Free &amp; open source · By Invar Gervi</p></footer>
+      <footer><p>Trusted devices · Files, folders & recovery</p><p>Free &amp; open source · By Invar Gervi</p></footer>
     </main>
   );
 }

@@ -210,7 +210,7 @@ async fn authenticated_tls_rejects_out_of_order_application_messages() {
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 5,
+            version: 6,
             initiator: true,
             trusted: false,
         },
@@ -219,7 +219,7 @@ async fn authenticated_tls_rejects_out_of_order_application_messages() {
     .unwrap();
     assert!(matches!(
         protocol::receive(&mut tls).await.unwrap(),
-        Message::Hello { version: 5, .. }
+        Message::Hello { version: 6, .. }
     ));
     protocol::send(&mut tls, &Message::Ready {}).await.unwrap();
     let c = phase(&server, "closed").await;
@@ -341,7 +341,7 @@ async fn partial_tcp_frame_survives_local_approval_without_reader_cancellation()
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 5,
+            version: 6,
             initiator: true,
             trusted: false,
         },
@@ -350,7 +350,7 @@ async fn partial_tcp_frame_survives_local_approval_without_reader_cancellation()
     .unwrap();
     assert!(matches!(
         protocol::receive(&mut tls).await.unwrap(),
-        Message::Hello { version: 5, .. }
+        Message::Hello { version: 6, .. }
     ));
     let request = phase(&server, "verifying").await;
     let (_, code) = transport::peer_and_code(&tls, &identity.fingerprint().unwrap(), true).unwrap();
@@ -624,7 +624,7 @@ async fn raw_connected_version(
     service: &Service,
     legacy: bool,
 ) -> (tokio_rustls::TlsStream<TcpStream>, String, Connection) {
-    let version = if legacy { 4 } else { 5 };
+    let version = if legacy { 4 } else { 6 };
     let identity = Identity::generate().unwrap();
     let peer = identity.fingerprint().unwrap();
     store_lock(&get_store(&service.shared).unwrap())
@@ -1092,7 +1092,7 @@ async fn sender_file_cancel_interrupts_backpressure_without_false_completion() {
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 5,
+            version: 6,
             initiator: false,
             trusted: true,
         },
@@ -2033,3 +2033,9 @@ async fn slow_finalization_keeps_tls_alive_for_single_files_and_folders() {
         s.stop().await;
     }
 }
+
+#[path = "resume_tests.rs"]
+mod resume_regressions;
+
+#[path = "resume_actor_tests.rs"]
+mod resume_actor_regressions;

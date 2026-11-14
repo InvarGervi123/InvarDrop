@@ -93,13 +93,37 @@ async fn file_choose(id: String, service: tauri::State<'_, secure::Service>) -> 
         let source = secure::files::Source::open(files[0].path())
             .await
             .map_err(|e| e.to_string())?;
-        service.send_file(&id, source).map_err(|e| e.to_string())
+        if service
+            .snapshot()
+            .connections
+            .iter()
+            .any(|c| c.id == id && c.supports_resume)
+        {
+            service
+                .send_resumable_file(&id, files[0].path())
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            service.send_file(&id, source).map_err(|e| e.to_string())
+        }
     } else {
         let paths = files.into_iter().map(|f| f.path().to_owned()).collect();
         let source = secure::bundle::BundleSource::files(paths)
             .await
             .map_err(|e| e.to_string())?;
-        service.send_bundle(&id, source).map_err(|e| e.to_string())
+        if service
+            .snapshot()
+            .connections
+            .iter()
+            .any(|c| c.id == id && c.supports_resume)
+        {
+            service
+                .send_resumable_bundle(&id, source)
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            service.send_bundle(&id, source).map_err(|e| e.to_string())
+        }
     }
 }
 #[tauri::command]
@@ -118,9 +142,42 @@ async fn folder_choose(
     let source = secure::bundle::BundleSource::folder(folder.path())
         .await
         .map_err(|e| e.to_string())?;
-    service.send_bundle(&id, source).map_err(|e| e.to_string())
+    if service
+        .snapshot()
+        .connections
+        .iter()
+        .any(|c| c.id == id && c.supports_resume)
+    {
+        service
+            .send_resumable_bundle(&id, source)
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        service.send_bundle(&id, source).map_err(|e| e.to_string())
+    }
 }
 
+#[tauri::command]
+async fn resume_transfer(
+    id: String,
+    transfer_id: String,
+    service: tauri::State<'_, secure::Service>,
+) -> Result<(), String> {
+    service
+        .resume_transfer(&id, &transfer_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn resume_discard(
+    transfer_id: String,
+    service: tauri::State<'_, secure::Service>,
+) -> Result<(), String> {
+    service
+        .discard_resume(&transfer_id)
+        .await
+        .map_err(|e| e.to_string())
+}
 #[tauri::command]
 async fn file_respond(
     id: String,
@@ -178,6 +235,8 @@ pub fn run() {
             secure_revoke,
             secure_unblock,
             file_choose,
+            resume_transfer,
+            resume_discard,
             folder_choose,
             file_respond,
             file_cancel

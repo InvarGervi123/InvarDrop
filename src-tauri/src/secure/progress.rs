@@ -9,10 +9,10 @@ pub(super) struct Meter {
     samples: VecDeque<(Instant, u64)>,
 }
 impl Meter {
-    pub fn new(now: Instant) -> Self {
+    pub fn new(now: Instant, baseline: u64) -> Self {
         Self {
             start: now,
-            samples: VecDeque::from([(now, 0)]),
+            samples: VecDeque::from([(now, baseline)]),
         }
     }
     pub fn sample(
@@ -49,7 +49,12 @@ impl Meter {
 pub(super) fn begin(s: &super::Shared, connection: &str) {
     let state = &mut *super::lock(&s.state);
     if let Some(entry) = state.entries.iter_mut().find(|e| e.view.id == connection) {
-        entry.meter = Some(Meter::new(Instant::now()));
+        let baseline = entry
+            .view
+            .transfer
+            .as_ref()
+            .map_or(0, |transfer| transfer.transferred);
+        entry.meter = Some(Meter::new(Instant::now(), baseline));
         entry.progress_wake.notify_one();
     }
 }
@@ -102,7 +107,7 @@ mod tests {
     #[test]
     fn measures_actual_bytes_and_delays_eta_until_reliable() {
         let now = Instant::now();
-        let mut meter = Meter::new(now);
+        let mut meter = Meter::new(now, 0);
         assert_eq!(meter.sample(now, 0, 1000), (None, None));
         let (rate, eta) = meter.sample(now + Duration::from_millis(500), 100, 1000);
         assert_eq!(rate, Some(200.0));
@@ -117,9 +122,22 @@ mod tests {
         );
     }
     #[test]
+    fn resumed_speed_excludes_previously_verified_bytes() {
+        let now = Instant::now();
+        let baseline = 4 * 1024 * 1024 * 1024u64 + 17;
+        let mut meter = Meter::new(now, baseline);
+        let (speed, eta) = meter.sample(
+            now + Duration::from_secs(1),
+            baseline + 65536,
+            baseline + 131072,
+        );
+        assert_eq!(speed, Some(65536.0));
+        assert_eq!(eta, Some(1));
+    }
+    #[test]
     fn empty_and_completed_files_have_no_eta_and_window_is_bounded() {
         let now = Instant::now();
-        let mut meter = Meter::new(now);
+        let mut meter = Meter::new(now, 0);
         for i in 1..100 {
             let (_, eta) = meter.sample(now + Duration::from_millis(i * 250), 0, 0);
             assert_eq!(eta, None);

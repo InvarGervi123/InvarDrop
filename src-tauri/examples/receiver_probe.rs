@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
     })?
     .map_err(io::Error::other)?;
-    let id =
+    let mut id =
         tauri::async_runtime::block_on(async { service.connect(target.id, target.endpoints) })?;
     println!("ready");
     io::stdout().flush()?;
@@ -67,6 +67,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         serde_json::json!({"phase":c.phase,"transfer":c.transfer.as_ref().map(|t| &t.status),"bytes":c.transfer.as_ref().map(|t|t.transferred),"total":c.transfer.as_ref().map(|t|t.size)})
                     );
                 }
+                "jobs" => {
+                    println!("{}", serde_json::to_string(&service.snapshot().resumable)?);
+                }
+                "reconnect" => {
+                    id = service.reconnect(&id)?;
+                    println!("reconnecting");
+                }
                 "cancel" => {
                     let snapshot = service.snapshot();
                     let transfer = snapshot
@@ -84,14 +91,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let source = tauri::async_runtime::block_on(
                             invardrop_lib::secure::bundle::BundleSource::folder(path),
                         )?;
-                        service.send_bundle(&id, source)?;
+                        if service
+                            .snapshot()
+                            .connections
+                            .iter()
+                            .any(|c| c.id == id && c.supports_resume)
+                        {
+                            tauri::async_runtime::block_on(
+                                service.send_resumable_bundle(&id, source),
+                            )?;
+                        } else {
+                            service.send_bundle(&id, source)?;
+                        }
                     } else {
-                        let source = tauri::async_runtime::block_on(Source::open(path))?;
-                        service.send_file(&id, source)?;
+                        if service
+                            .snapshot()
+                            .connections
+                            .iter()
+                            .any(|c| c.id == id && c.supports_resume)
+                        {
+                            tauri::async_runtime::block_on(service.send_resumable_file(&id, path))?;
+                        } else {
+                            let source = tauri::async_runtime::block_on(Source::open(path))?;
+                            service.send_file(&id, source)?;
+                        }
                     }
                     println!("sent");
                 }
                 "quit" => return Ok(()),
+                _ if line.starts_with("resume ") => {
+                    tauri::async_runtime::block_on(service.resume_transfer(&id, &line[7..]))?;
+                    println!("resume offered");
+                }
                 _ if line.starts_with("approve ") => {
                     service.respond(&id, true, line[8..].into())?;
                     println!("approved");

@@ -1,5 +1,8 @@
 # Milestone 2.2 — TLS и pairing
 
+Актуальное дополнение Milestone 2.7: [восстановление передач](resumable-transfers.md).
+
+
 Актуальный протокол Milestone 2.6, папки, лимиты и совместимость с 2.5 описаны
 в [large-files-folders.md](large-files-folders.md). Ниже сохранён контекст своего этапа.
 
