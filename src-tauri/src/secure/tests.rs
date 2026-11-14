@@ -1939,3 +1939,97 @@ async fn sparse_file_over_four_gib_streams_over_real_tls_with_exact_u64_progress
     assert_eq!(complete.transferred, size);
     s.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_finalization_keeps_tls_alive_for_single_files_and_folders() {
+    for bundle in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let s = start(dir.path(), Duration::from_secs(10)).await;
+        let (mut tls, _, c) = raw_connected(&s).await;
+        let id = if bundle {
+            let id = raw_bundle_offer(&s, &c.id, &mut tls, bundle_manifest(3)).await;
+            accept_bundle(&s, &c.id, &mut tls, &id).await;
+            id
+        } else {
+            raw_offer(&s, &c.id, &mut tls, 3).await
+        };
+        let gate = lock(&s.shared.state)
+            .entries
+            .iter()
+            .find(|e| e.view.id == c.id)
+            .unwrap()
+            .gate
+            .clone();
+        let (at, reached) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        gate.pause_before(move || {
+            let _ = at.send(());
+            let _ = wait.recv_timeout(Duration::from_secs(10));
+        });
+        protocol::send(
+            &mut tls,
+            &Message::FileChunk {
+                id: id.clone(),
+                data: b"abc".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        let hash = blake3::hash(b"abc").to_hex().to_string();
+        if bundle {
+            protocol::send(
+                &mut tls,
+                &Message::BundleFileEnd {
+                    id: id.clone(),
+                    index: 0,
+                    hash,
+                },
+            )
+            .await
+            .unwrap();
+            protocol::send(&mut tls, &Message::BundleEnd { id: id.clone() })
+                .await
+                .unwrap();
+        } else {
+            protocol::send(
+                &mut tls,
+                &Message::FileFinish {
+                    id: id.clone(),
+                    hash,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        timeout(Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        protocol::send(&mut tls, &Message::Ping {}).await.unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                match protocol::receive(&mut tls).await.unwrap() {
+                    Message::Pong {} => break,
+                    Message::Ping {} => protocol::send(&mut tls, &Message::Pong {}).await.unwrap(),
+                    _ => panic!("Must still be finalizing"),
+                }
+            }
+        })
+        .await
+        .expect("Filesystem commit must not block keepalive replies");
+        assert!(file_status(&s, &c.id, "finalizing").await.path.is_none());
+        release.send(()).unwrap();
+        assert!(matches!(
+            raw_message(&mut tls).await,
+            Message::FileComplete { .. }
+        ));
+        file_status(&s, &c.id, "complete").await;
+        assert!(
+            s.snapshot()
+                .connections
+                .iter()
+                .any(|e| e.id == c.id && e.phase == "connected")
+        );
+        s.stop().await;
+    }
+}

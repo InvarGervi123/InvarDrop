@@ -279,7 +279,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         let finish=match source {Outgoing::Single(source)=>Message::FileFinish{id:id.clone(),hash:source.digest()},Outgoing::Bundle(_)=>Message::BundleEnd{id:id.clone()}};
                         framed.send(&finish).await?;
                         transfer_view(s,connection,&id,"finalizing");
-                        transfer=Transfer::AwaitComplete{id,deadline:Instant::now()+FILE_ACTIVITY};
+                        transfer=Transfer::AwaitComplete{id,deadline:Instant::now()+FINALIZATION};
                     }
                 }
             }
@@ -412,7 +412,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                             let _=done.send(result);
                         });
                         lock(&s.tasks).push(finalize);
-                        result.await.map_err(|_|Error::FileIo)??;
+                        wait_finalization(&mut framed,messages,result,&mut last_received,&mut control_window,&mut controls).await?;
                         framed.send(&Message::FileComplete{id}).await?;
                     }
                     Message::FileComplete{id}=>{
@@ -462,4 +462,35 @@ fn supports_bundles(s: &Shared, connection: &str) -> bool {
         .iter()
         .find(|e| e.view.id == connection)
         .is_some_and(|e| e.view.supports_bundles)
+}
+
+// Large-file fsync may take longer than an idle interval. Keep the authenticated
+// channel responsive while the owned finalizer retains the commit/cancel gate.
+const FINALIZATION: Duration = Duration::from_secs(5 * 60);
+async fn wait_finalization<W: tokio::io::AsyncWrite + Unpin>(
+    framed: &mut TrackedWriter<'_, W>,
+    messages: &mut mpsc::Receiver<Result<Message>>,
+    result: tokio::sync::oneshot::Receiver<Result<PathBuf>>,
+    last_received: &mut Instant,
+    window: &mut Instant,
+    controls: &mut u32,
+) -> Result<PathBuf> {
+    tokio::pin!(result);
+    let deadline = tokio::time::sleep(FINALIZATION);
+    tokio::pin!(deadline);
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        tokio::select! {
+            finished=&mut result=>return finished.map_err(|_|Error::FileIo)?,
+            _=&mut deadline=>return Err(Error::Expired),
+            _=tokio::time::sleep_until((*last_received+Duration::from_secs(20)).into())=>return Err(Error::Expired),
+            _=tick.tick()=>framed.send(&Message::Ping{}).await?,
+            message=next(messages)=>{
+                if window.elapsed()>=Duration::from_secs(60){*window=Instant::now();*controls=0;}
+                *controls+=1;if *controls>64{return Err(Error::Limit);}
+                *last_received=Instant::now();
+                match message? {Message::Ping{}=>framed.send(&Message::Pong{}).await?, Message::Pong{}=>{}, _=>return Err(Error::Protocol)}
+            }
+        }
+    }
 }

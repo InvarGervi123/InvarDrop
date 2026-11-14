@@ -418,7 +418,8 @@ impl BundleSink {
         {
             return Err(Error::Integrity);
         }
-        current.file.sync_all().await.map_err(|_| Error::FileIo)?;
+        // Durability IO belongs to whole-operation finalization. Keeping fsync
+        // out of this frame handler lets large files continue exchanging pings.
         drop(current.file.into_std().await);
         self.index += 1;
         Ok(())
@@ -438,6 +439,19 @@ impl BundleSink {
         }
         tokio::task::spawn_blocking(move || {
             gate.check()?;
+            for entry in self
+                .manifest
+                .entries
+                .iter()
+                .filter(|e| e.kind == Kind::File)
+            {
+                gate.check()?;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(self.staging.path().join("payload").join(&entry.path))
+                    .and_then(|f| f.sync_all())
+                    .map_err(|_| Error::FileIo)?;
+            }
             #[cfg(unix)]
             {
                 for entry in self
@@ -447,6 +461,7 @@ impl BundleSink {
                     .rev()
                     .filter(|e| e.kind == Kind::Directory)
                 {
+                    gate.check()?;
                     fs::File::open(self.staging.path().join("payload").join(&entry.path))
                         .and_then(|f| f.sync_all())
                         .map_err(|_| Error::FileIo)?;
