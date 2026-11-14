@@ -1,3 +1,4 @@
+use super::files::CommitGate;
 use super::{
     error::{Error, Result},
     files::{self, Sink, Source},
@@ -6,6 +7,8 @@ use super::{
     transport,
 };
 use serde::Serialize;
+#[path = "progress.rs"]
+mod progress;
 use std::{
     collections::VecDeque,
     net::{Ipv4Addr, SocketAddr},
@@ -49,6 +52,9 @@ pub struct TransferView {
     pub name: String,
     pub sender_name: Option<String>,
     pub size: u64,
+    pub transferred: u64,
+    pub bytes_per_second: Option<f64>,
+    pub eta_seconds: Option<u64>,
     pub status: String,
     pub path: Option<String>,
     pub error: Option<String>,
@@ -57,7 +63,7 @@ impl TransferView {
     fn active(&self) -> bool {
         !matches!(
             self.status.as_str(),
-            "complete" | "rejected" | "expired" | "error"
+            "complete" | "rejected" | "expired" | "cancelled" | "error"
         )
     }
 }
@@ -93,6 +99,14 @@ struct Entry {
     cancel: watch::Sender<bool>,
     rejected: bool,
     approval_deadline: Option<Instant>,
+    gate: Arc<CommitGate>,
+    finish_running: bool,
+    file_cancelled: bool,
+    cancel_notice: Option<String>,
+    transport_error: Option<String>,
+    frame_idle: Arc<std::sync::atomic::AtomicBool>,
+    meter: Option<progress::Meter>,
+    progress_wake: Arc<tokio::sync::Notify>,
 }
 struct State {
     snapshot: Snapshot,
@@ -237,8 +251,12 @@ impl Service {
             .iter()
             .find(|e| e.view.id == id)
             .ok_or(Error::NotReady)?;
+        let _ = e.gate.cancel();
         let _ = e.cancel.send(true);
         Ok(())
+    }
+    pub fn cancel_file(&self, id: &str, transfer_id: &str) -> Result<()> {
+        request_file_cancel(&self.shared, id, transfer_id, true)
     }
     pub fn can_send_file(&self, id: &str) -> Result<()> {
         let state = lock(&self.shared.state);
@@ -282,6 +300,9 @@ impl Service {
                 name: source.name.clone(),
                 sender_name: None,
                 size: source.size,
+                transferred: 0,
+                bytes_per_second: None,
+                eta_seconds: None,
                 status: "offering".into(),
                 path: None,
                 error: None,
@@ -293,6 +314,10 @@ impl Service {
                     source: Box::new(source),
                 })
                 .map_err(|_| Error::NotReady)?;
+            entry.gate = Arc::new(CommitGate::default());
+            entry.file_cancelled = false;
+            entry.cancel_notice = None;
+            entry.meter = None;
             entry.view.transfer = Some(transfer);
             Ok(())
         })
@@ -337,6 +362,7 @@ impl Service {
         update(&self.shared, |state| {
             for e in &state.entries {
                 if e.view.peer.as_ref() == Some(&id) {
+                    let _ = e.gate.cancel();
                     let _ = e.cancel.send(true);
                 }
             }
@@ -352,6 +378,9 @@ impl Service {
         refresh_trust(&self.shared)
     }
     pub async fn stop(&self) {
+        for entry in &lock(&self.shared.state).entries {
+            let _ = entry.gate.cancel();
+        }
         self.shared.port.store(0, Ordering::Release);
         self.shared.stop.send_replace(true);
         let listener = lock(&self.listener).take();
@@ -553,6 +582,14 @@ fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> R
             cancel,
             rejected: false,
             approval_deadline: None,
+            gate: Arc::new(CommitGate::default()),
+            finish_running: false,
+            file_cancelled: false,
+            cancel_notice: None,
+            transport_error: None,
+            frame_idle: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            meter: None,
+            progress_wake: Arc::new(tokio::sync::Notify::new()),
         });
     });
     let shared = s.clone();
@@ -564,7 +601,11 @@ fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> R
         view(&shared, &task_id, |e| {
             e.view.phase = "closed".into();
             e.view.code = None;
-            e.view.error = if e.rejected {
+            e.view.error = if e.file_cancelled {
+                None
+            } else if e.transport_error.is_some() {
+                e.transport_error.clone()
+            } else if e.rejected {
                 Some(Error::Rejected.to_string())
             } else {
                 result.err().map(|e| e.to_string())
@@ -572,7 +613,17 @@ fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> R
             if let Some(transfer) = &mut e.view.transfer
                 && transfer.active()
             {
-                transfer.status = if e.view.error == Some(Error::Expired.to_string()) {
+                transfer.bytes_per_second = None;
+                transfer.eta_seconds = None;
+                transfer.status = if e.file_cancelled {
+                    if e.finish_running {
+                        "cancelling"
+                    } else {
+                        "cancelled"
+                    }
+                } else if e.finish_running {
+                    "finalizing"
+                } else if e.view.error == Some(Error::Expired.to_string()) {
                     "expired"
                 } else {
                     "error"
@@ -648,7 +699,7 @@ async fn connection(
         protocol::send(
             &mut stream,
             &Message::Hello {
-                version: 3,
+                version: 4,
                 initiator,
                 trusted,
             },
@@ -656,7 +707,7 @@ async fn connection(
         .await?;
         match protocol::receive(&mut stream).await? {
             Message::Hello {
-                version: 3,
+                version: 4,
                 initiator: other,
                 trusted: remote,
             } if other != initiator && remote == trusted => Ok(()),
@@ -670,9 +721,24 @@ async fn connection(
     });
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (messages_tx, mut messages) = mpsc::channel(4);
-    let reader_task = ReaderTask(tokio::spawn(async move {
+    let reader_shared = s.clone();
+    let reader_id = id.to_owned();
+    let reader_task = AbortTask(tokio::spawn(async move {
         loop {
             let result = protocol::receive(&mut reader).await;
+            if let Ok(Message::FileCancel { id: transfer_id }) = &result {
+                match request_file_cancel(&reader_shared, &reader_id, transfer_id, false) {
+                    Ok(()) => break,
+                    Err(Error::CommitStarted) => continue,
+                    Err(_) => {
+                        transport_failed(&reader_shared, &reader_id, &Error::Protocol);
+                        break;
+                    }
+                }
+            }
+            if let Err(error) = &result {
+                transport_failed(&reader_shared, &reader_id, error);
+            }
             let failed = result.is_err();
             if messages_tx.send(result).await.is_err() || failed {
                 break;
@@ -680,16 +746,38 @@ async fn connection(
         }
     }));
     let result = tokio::select! {
-        r=application(&s,id,Proof {peer:&peer,code:&code,trusted},&mut writer,&mut messages,actions)=>r,
+        biased;
         _=cancel.changed()=>Err(Error::Cancelled),
         _=stop.changed()=>Err(Error::Cancelled),
+        r=application(&s,id,Proof {peer:&peer,code:&code,trusted},&mut writer,&mut messages,actions)=>r,
     };
+    let notice = {
+        let state = lock(&s.state);
+        state
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .and_then(|e| {
+                let _ = e.gate.cancel();
+                e.frame_idle
+                    .load(Ordering::SeqCst)
+                    .then(|| e.cancel_notice.clone())
+                    .flatten()
+            })
+    };
+    if let Some(transfer_id) = notice {
+        let _ = timeout(
+            Duration::from_millis(500),
+            protocol::send(&mut writer, &Message::FileCancel { id: transfer_id }),
+        )
+        .await;
+    }
     let _ = timeout(Duration::from_secs(1), writer.shutdown()).await;
     drop(reader_task);
     result
 }
-struct ReaderTask(JoinHandle<()>);
-impl Drop for ReaderTask {
+struct AbortTask(JoinHandle<()>);
+impl Drop for AbortTask {
     fn drop(&mut self) {
         self.0.abort();
     }
@@ -790,3 +878,38 @@ mod transfer;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+fn request_file_cancel(s: &Shared, id: &str, transfer_id: &str, notify_peer: bool) -> Result<()> {
+    transaction(s, |state| {
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.view.id == id)
+            .ok_or(Error::NotReady)?;
+        let t = entry.view.transfer.as_mut().ok_or(Error::Approval)?;
+        if entry.view.phase != "connected"
+            || t.id != transfer_id
+            || !t.active()
+            || entry.file_cancelled
+        {
+            return Err(Error::Approval);
+        }
+        entry.gate.cancel()?;
+        entry.file_cancelled = true;
+        entry.cancel_notice = notify_peer.then(|| transfer_id.to_owned());
+        entry.approval_deadline = None;
+        t.status = "cancelling".into();
+        t.bytes_per_second = None;
+        t.eta_seconds = None;
+        entry.cancel.send_replace(true);
+        Ok(())
+    })
+}
+fn transport_failed(s: &Shared, id: &str, error: &Error) {
+    let mut state = lock(&s.state);
+    if let Some(entry) = state.entries.iter_mut().find(|e| e.view.id == id) {
+        let _ = entry.gate.cancel();
+        entry.transport_error = Some(error.to_string());
+        entry.cancel.send_replace(true);
+    }
+}

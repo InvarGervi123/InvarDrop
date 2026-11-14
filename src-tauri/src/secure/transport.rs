@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 
-pub const ALPN: &[u8] = b"invardrop/3";
+pub const ALPN: &[u8] = b"invardrop/4";
 /// Unknown keys are QUARANTINED, not trusted. TLS CertificateVerify signatures
 /// remain mandatory. Authority is established by pinned SPKI or out-of-band SAS.
 #[derive(Debug)]
@@ -215,7 +215,7 @@ mod tests {
         .with_custom_certificate_verifier(Arc::new(QuarantinedVerifier { expected: None }))
         .with_client_auth_cert(vec![identity.cert()], identity.key())
         .unwrap();
-        config.alpn_protocols = vec![b"invardrop/2".to_vec()];
+        config.alpn_protocols = vec![b"invardrop/3".to_vec()];
         let client = TlsConnector::from(Arc::new(config));
         let (a, b) = tokio::io::duplex(4096);
         let server = tokio::spawn(async move { server.accept(a).await });

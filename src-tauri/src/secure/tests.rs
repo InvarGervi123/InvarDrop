@@ -36,10 +36,13 @@ async fn start(root: &Path, duration: Duration) -> Service {
     start_with_master(root, duration, &random::<32>().unwrap()).await
 }
 async fn start_with_master(root: &Path, duration: Duration, master: &[u8]) -> Service {
+    start_observed(root, duration, master, Arc::new(|_| {})).await
+}
+async fn start_observed(root: &Path, duration: Duration, master: &[u8], notify: Notify) -> Service {
     let store = Store::for_test(root, master).unwrap();
     let mut shared = make_shared(
         Arc::new(AtomicU16::new(0)),
-        Arc::new(|_| {}),
+        notify,
         duration,
         root.join("received"),
     );
@@ -207,7 +210,7 @@ async fn authenticated_tls_rejects_out_of_order_application_messages() {
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 3,
+            version: 4,
             initiator: true,
             trusted: false,
         },
@@ -216,7 +219,7 @@ async fn authenticated_tls_rejects_out_of_order_application_messages() {
     .unwrap();
     assert!(matches!(
         protocol::receive(&mut tls).await.unwrap(),
-        Message::Hello { version: 3, .. }
+        Message::Hello { version: 4, .. }
     ));
     protocol::send(&mut tls, &Message::Ready {}).await.unwrap();
     let c = phase(&server, "closed").await;
@@ -338,7 +341,7 @@ async fn partial_tcp_frame_survives_local_approval_without_reader_cancellation()
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 3,
+            version: 4,
             initiator: true,
             trusted: false,
         },
@@ -347,7 +350,7 @@ async fn partial_tcp_frame_survives_local_approval_without_reader_cancellation()
     .unwrap();
     assert!(matches!(
         protocol::receive(&mut tls).await.unwrap(),
-        Message::Hello { version: 3, .. }
+        Message::Hello { version: 4, .. }
     ));
     let request = phase(&server, "verifying").await;
     let (_, code) = transport::peer_and_code(&tls, &identity.fingerprint().unwrap(), true).unwrap();
@@ -632,7 +635,7 @@ async fn raw_connected(
     protocol::send(
         &mut tls,
         &Message::Hello {
-            version: 3,
+            version: 4,
             initiator: true,
             trusted: true,
         },
@@ -642,7 +645,7 @@ async fn raw_connected(
     assert!(matches!(
         raw_message(&mut tls).await,
         Message::Hello {
-            version: 3,
+            version: 4,
             trusted: true,
             ..
         }
@@ -711,6 +714,11 @@ async fn explicit_file_rejection_then_zero_and_many_chunks_preserve_original_and
         assert!(b.respond_file(&bc.id, &offer.id, true).is_err());
         file_status(&a, &ac.id, "complete").await;
         let receipt = file_status(&b, &bc.id, "complete").await;
+        assert_eq!(receipt.transferred, bytes.len() as u64);
+        assert_eq!(
+            file_status(&a, &ac.id, "complete").await.transferred,
+            bytes.len() as u64
+        );
         let received = PathBuf::from(receipt.path.unwrap());
         assert!(received.starts_with(&b.shared.receive_directory));
         assert!(std::fs::read(&received).unwrap() == bytes);
@@ -997,6 +1005,337 @@ async fn unsafe_sender_name_is_not_published_as_a_request() {
             .transfer
             .is_none()
     );
+    no_received_files(&s);
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn receiver_file_cancel_closes_promptly_and_cleans_received_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = start(dir.path(), Duration::from_secs(10)).await;
+    let (mut tls, _, c) = raw_connected(&s).await;
+    let id = raw_offer(&s, &c.id, &mut tls, files::CHUNK_SIZE as u64 * 2).await;
+    assert!(s.cancel_file(&c.id, "stale-id").is_err());
+    protocol::send(
+        &mut tls,
+        &Message::FileChunk {
+            id: id.clone(),
+            data: vec![7; files::CHUNK_SIZE],
+        },
+    )
+    .await
+    .unwrap();
+    protocol::send(&mut tls, &Message::Ping {}).await.unwrap();
+    loop {
+        if matches!(protocol::receive(&mut tls).await.unwrap(), Message::Pong {}) {
+            break;
+        }
+    }
+    let received = timeout(Duration::from_secs(2), async {
+        loop {
+            let progress = file_status(&s, &c.id, "receiving").await;
+            if progress.transferred == files::CHUNK_SIZE as u64 {
+                break progress;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(received.transferred, files::CHUNK_SIZE as u64);
+    s.cancel_file(&c.id, &id).unwrap();
+    assert!(s.cancel_file(&c.id, &id).is_err());
+    assert!(
+        matches!(raw_message(&mut tls).await, Message::FileCancel{id:cancelled} if cancelled==id)
+    );
+    timeout(Duration::from_secs(3), closed(&s, &c.id))
+        .await
+        .unwrap();
+    let cancelled = file_status(&s, &c.id, "cancelled").await;
+    assert_eq!(cancelled.transferred, received.transferred);
+    assert!(cancelled.path.is_none());
+    no_received_files(&s);
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sender_file_cancel_interrupts_backpressure_without_false_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = start(dir.path(), Duration::from_secs(10)).await;
+    let identity = Identity::generate().unwrap();
+    store_lock(&get_store(&s.shared).unwrap())
+        .unwrap()
+        .trust(&identity.fingerprint().unwrap())
+        .unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    s.connect("raw receiver".into(), vec![listener.local_addr().unwrap()])
+        .unwrap();
+    let (tcp, _) = listener.accept().await.unwrap();
+    let mut tls: tokio_rustls::TlsStream<TcpStream> = transport::acceptor(&identity)
+        .unwrap()
+        .accept(tcp)
+        .await
+        .unwrap()
+        .into();
+    protocol::send(
+        &mut tls,
+        &Message::Hello {
+            version: 4,
+            initiator: false,
+            trusted: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        protocol::receive(&mut tls).await.unwrap(),
+        Message::Hello { trusted: true, .. }
+    ));
+    protocol::send(&mut tls, &Message::Ready {}).await.unwrap();
+    assert!(matches!(
+        protocol::receive(&mut tls).await.unwrap(),
+        Message::Ready {}
+    ));
+    let c = phase(&s, "connected").await;
+    let source = dir.path().join("large.bin");
+    std::fs::File::create(&source)
+        .unwrap()
+        .set_len(128 * 1024 * 1024)
+        .unwrap();
+    s.send_file(&c.id, Source::open(&source).await.unwrap())
+        .unwrap();
+    let id = match raw_message(&mut tls).await {
+        Message::FileOffer { id, .. } => id,
+        _ => panic!("Expected offer"),
+    };
+    protocol::send(
+        &mut tls,
+        &Message::FileAccept {
+            id: id.clone(),
+            accept: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        raw_message(&mut tls).await,
+        Message::FileChunk { .. }
+    ));
+    s.cancel_file(&c.id, &id).unwrap();
+    timeout(Duration::from_secs(3), closed(&s, &c.id))
+        .await
+        .unwrap();
+    let cancelled = file_status(&s, &c.id, "cancelled").await;
+    assert!(cancelled.transferred > 0 && cancelled.transferred < cancelled.size);
+    assert!(cancelled.path.is_none());
+    assert_eq!(std::fs::metadata(source).unwrap().len(), 128 * 1024 * 1024);
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancellation_races_with_finalization_at_one_publication_boundary() {
+    for cancel_wins in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let s = start(dir.path(), Duration::from_secs(10)).await;
+        let (mut tls, _, c) = raw_connected(&s).await;
+        let id = raw_offer(&s, &c.id, &mut tls, 3).await;
+        let gate = lock(&s.shared.state)
+            .entries
+            .iter()
+            .find(|e| e.view.id == c.id)
+            .unwrap()
+            .gate
+            .clone();
+        let (at, reached) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let pause = move || {
+            let _ = at.send(());
+            let _ = wait.recv_timeout(Duration::from_secs(10));
+        };
+        if cancel_wins {
+            gate.pause_before(pause);
+        } else {
+            gate.pause_after(pause);
+        }
+        protocol::send(
+            &mut tls,
+            &Message::FileChunk {
+                id: id.clone(),
+                data: b"abc".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        protocol::send(
+            &mut tls,
+            &Message::FileFinish {
+                id: id.clone(),
+                hash: blake3::hash(b"abc").to_hex().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        timeout(Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        if cancel_wins {
+            s.cancel_file(&c.id, &id).unwrap();
+            timeout(Duration::from_secs(3), closed(&s, &c.id))
+                .await
+                .unwrap();
+            assert_eq!(file_status(&s, &c.id, "cancelling").await.path, None);
+        } else {
+            assert_eq!(s.cancel_file(&c.id, &id), Err(Error::CommitStarted));
+        }
+        release.send(()).unwrap();
+        if cancel_wins {
+            let cancelled = file_status(&s, &c.id, "cancelled").await;
+            assert!(cancelled.path.is_none());
+            no_received_files(&s);
+        } else {
+            let complete = file_status(&s, &c.id, "complete").await;
+            assert_eq!(std::fs::read(complete.path.unwrap()).unwrap(), b"abc");
+            assert!(matches!(
+                raw_message(&mut tls).await,
+                Message::FileComplete { .. }
+            ));
+        }
+        s.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_stream_progress_is_exact_monotonic_throttled_and_has_measured_eta() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<(Instant, Snapshot)>::new()));
+    let capture = events.clone();
+    let s = start_observed(
+        dir.path(),
+        Duration::from_secs(15),
+        &random::<32>().unwrap(),
+        Arc::new(move |snapshot| lock(&capture).push((Instant::now(), snapshot))),
+    )
+    .await;
+    let (mut tls, _, c) = raw_connected(&s).await;
+    let count = 32;
+    let chunk = vec![4; files::CHUNK_SIZE];
+    let total = (count * chunk.len()) as u64;
+    let id = raw_offer(&s, &c.id, &mut tls, total).await;
+    let start = Instant::now();
+    let mut hash = blake3::Hasher::new();
+    for _ in 0..count {
+        protocol::send(
+            &mut tls,
+            &Message::FileChunk {
+                id: id.clone(),
+                data: chunk.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        hash.update(&chunk);
+        sleep(Duration::from_millis(45)).await;
+    }
+    protocol::send(
+        &mut tls,
+        &Message::FileFinish {
+            id,
+            hash: hash.finalize().to_hex().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        raw_message(&mut tls).await,
+        Message::FileComplete { .. }
+    ));
+    let complete = file_status(&s, &c.id, "complete").await;
+    assert_eq!(complete.transferred, total);
+    {
+        let captured = lock(&events);
+        let views: Vec<_> = captured
+            .iter()
+            .filter_map(|(time, snapshot)| {
+                snapshot
+                    .connections
+                    .iter()
+                    .find(|e| e.id == c.id)
+                    .and_then(|e| e.transfer.as_ref())
+                    .map(|t| (*time, t))
+            })
+            .collect();
+        let mut previous = 0;
+        for (_, t) in &views {
+            assert!(t.transferred >= previous && t.transferred <= total);
+            previous = t.transferred;
+        }
+        let updates: Vec<_> = views
+            .iter()
+            .filter(|(_, t)| t.status == "receiving" && t.transferred > 0)
+            .collect();
+        assert!(updates.len() >= 2);
+        assert!(updates.len() as u128 <= start.elapsed().as_millis() / 200 + 2);
+        assert!(
+            updates
+                .windows(2)
+                .all(|pair| pair[1].0.duration_since(pair[0].0) >= Duration::from_millis(200))
+        );
+        assert!(updates.iter().any(|(_, t)| {
+            t.bytes_per_second.is_some_and(|v| v > 0.0 && v.is_finite()) && t.eta_seconds.is_some()
+        }));
+    }
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transport_loss_during_finalization_cancels_unpublished_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = start(dir.path(), Duration::from_secs(10)).await;
+    let (mut tls, _, c) = raw_connected(&s).await;
+    let id = raw_offer(&s, &c.id, &mut tls, 3).await;
+    let gate = lock(&s.shared.state)
+        .entries
+        .iter()
+        .find(|e| e.view.id == c.id)
+        .unwrap()
+        .gate
+        .clone();
+    let (at, reached) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    gate.pause_before(move || {
+        let _ = at.send(());
+        let _ = wait.recv_timeout(Duration::from_secs(10));
+    });
+    protocol::send(
+        &mut tls,
+        &Message::FileChunk {
+            id: id.clone(),
+            data: b"abc".to_vec(),
+        },
+    )
+    .await
+    .unwrap();
+    protocol::send(
+        &mut tls,
+        &Message::FileFinish {
+            id,
+            hash: blake3::hash(b"abc").to_hex().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(5), reached)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(tls);
+    timeout(Duration::from_secs(3), closed(&s, &c.id))
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    let failed = file_status(&s, &c.id, "error").await;
+    assert!(failed.path.is_none());
     no_received_files(&s);
     s.stop().await;
 }

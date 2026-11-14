@@ -1,5 +1,8 @@
 # Milestone 2.4 — интерфейс согласия получателя
 
+Зафиксировано в PR #8. Текущие дополнения 2.5, версия протокола и новая граница
+отмены описаны в [transfer-progress.md](transfer-progress.md).
+
 Расширен существующий UI 2.3; streaming, BLAKE3, фиксированный inbox и no-clobber
 finalization не переписаны. Incoming request показывает имя отправителя, basename,
 читаемый размер и состояния waiting / accepted / declined / expired / completed /

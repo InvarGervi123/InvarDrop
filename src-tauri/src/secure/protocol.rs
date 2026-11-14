@@ -40,6 +40,9 @@ pub enum Message {
         id: String,
         hash: String,
     },
+    FileCancel {
+        id: String,
+    },
     FileComplete {
         id: String,
     },

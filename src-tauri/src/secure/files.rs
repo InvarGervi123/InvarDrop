@@ -55,6 +55,63 @@ fn validate_size(size: u64) -> Result<()> {
     }
 }
 
+/// Serializes cancellation with the start of no-clobber publication.
+/// No OS IO or waits occur in cancel(). Once publication starts cancellation loses.
+#[derive(Default)]
+pub struct CommitGate {
+    state: std::sync::atomic::AtomicU8,
+    #[cfg(test)]
+    before: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    after: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+impl CommitGate {
+    pub fn cancel(&self) -> Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        match self.state.compare_exchange(0, 1, SeqCst, SeqCst) {
+            Ok(_) | Err(1) => Ok(()),
+            Err(_) => Err(Error::CommitStarted),
+        }
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.state.load(std::sync::atomic::Ordering::SeqCst) == 1
+    }
+    fn check(&self) -> Result<()> {
+        if self.is_cancelled() {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+    fn begin(&self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(hook) = self.before.lock().unwrap().take() {
+            hook();
+        }
+        self.state
+            .compare_exchange(
+                0,
+                2,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .map_err(|_| Error::Cancelled)?;
+        #[cfg(test)]
+        if let Some(hook) = self.after.lock().unwrap().take() {
+            hook();
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn pause_before(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.before.lock().unwrap() = Some(Box::new(hook));
+    }
+    #[cfg(test)]
+    pub(crate) fn pause_after(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.after.lock().unwrap() = Some(Box::new(hook));
+    }
+}
+
 pub struct Source {
     pub name: String,
     pub size: u64,
@@ -216,13 +273,25 @@ impl Sink {
     }
     /// The caller owns this future through its local commit/publication task.
     /// Once the blocking finalization starts, canceling its await cannot undo it.
-    pub async fn finish(mut self, expected: &str) -> Result<PathBuf> {
+    pub async fn finish(self, expected: &str) -> Result<PathBuf> {
+        self.finish_cancellable(expected, std::sync::Arc::new(CommitGate::default()), || {})
+            .await
+    }
+    pub async fn finish_cancellable(
+        mut self,
+        expected: &str,
+        gate: std::sync::Arc<CommitGate>,
+        on_commit: impl FnOnce() + Send + 'static,
+    ) -> Result<PathBuf> {
+        gate.check()?;
         let expected = blake3::Hash::from_hex(expected).map_err(|_| Error::Integrity)?;
         if self.received != self.size || self.hasher.finalize() != expected {
             return Err(Error::Integrity);
         }
         self.file.flush().await.map_err(|_| Error::FileIo)?;
+        gate.check()?;
         self.file.sync_all().await.map_err(|_| Error::FileIo)?;
+        gate.check()?;
         let Self {
             file,
             temporary,
@@ -234,6 +303,8 @@ impl Sink {
         // remains when the temporary path is renamed.
         drop(file.into_std().await);
         tokio::task::spawn_blocking(move || {
+            gate.begin()?;
+            on_commit();
             let destination = directory.path().join(name);
             if let Err(error) = temporary.persist_noclobber(&destination) {
                 // A local process might have placed a file here. Preserve it,
