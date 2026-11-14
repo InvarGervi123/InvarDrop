@@ -413,6 +413,9 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         });
                         lock(&s.tasks).push(finalize);
                         wait_finalization(&mut framed,messages,result,&mut last_received,&mut control_window,&mut controls).await?;
+                        // The helper sent keepalives during fsync. Discard elapsed
+                        // outer ticks instead of bursting them at the peer now.
+                        tick.reset();
                         framed.send(&Message::FileComplete{id}).await?;
                     }
                     Message::FileComplete{id}=>{
