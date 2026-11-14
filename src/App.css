@@ -123,3 +123,6 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 .trust-settings summary { cursor: pointer; padding: 4px; }
 .trust-settings ul { list-style: none; padding: 0; }
 .trust-settings li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 10px 0; }
+.file-transfer { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.file-name { font-weight: 600; overflow-wrap: anywhere; }
+.receive-directory, .saved-path { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; user-select: text; }

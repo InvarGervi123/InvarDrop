@@ -69,6 +69,35 @@ async fn secure_unblock(
     service.unblock(id).await.map_err(|e| e.to_string())
 }
 
+// Filesystem authority stays in Rust: IPC accepts only connection/transfer IDs.
+// A source path can enter this command only through the native picker.
+#[tauri::command]
+async fn file_choose(id: String, service: tauri::State<'_, secure::Service>) -> Result<(), String> {
+    service.can_send_file(&id).map_err(|e| e.to_string())?;
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .set_title("Choose a file to send")
+        .pick_file()
+        .await
+    else {
+        return Ok(());
+    };
+    let source = secure::files::Source::open(file.path())
+        .await
+        .map_err(|e| e.to_string())?;
+    service.send_file(&id, source).map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn file_respond(
+    id: String,
+    transfer_id: String,
+    accept: bool,
+    service: tauri::State<'_, secure::Service>,
+) -> Result<(), String> {
+    service
+        .respond_file(&id, &transfer_id, accept)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -96,7 +125,9 @@ pub fn run() {
             secure_cancel,
             secure_reconnect,
             secure_revoke,
-            secure_unblock
+            secure_unblock,
+            file_choose,
+            file_respond
         ])
         .build(tauri::generate_context!())
         .expect("error while building InvarDrop");

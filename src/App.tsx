@@ -39,6 +39,7 @@ function App() {
         {security?.status === "starting" && <p className="service-status" role="status">Opening protected device identity…</p>}
         {(securityBridgeError || security?.error) && <p role="alert" className="error-text">{security?.error ?? "Open the desktop app to use secure connections."}</p>}
         {error && <p role="alert" className="error-text">{error}</p>}
+        {security?.receiveDirectory && <p className="receive-directory">Received files: <span dir="auto">{security.receiveDirectory}</span></p>}
         {visibleConnections.map(c => <PairCard key={c.id} connection={c} operate={operate} />)}
         {security?.identity && <details className="trust-settings"><summary>Device identity &amp; trusted peers</summary>
           <p>Your public key fingerprint:</p><code className="fingerprint" dir="ltr">{security.identity}</code>
@@ -47,7 +48,7 @@ function App() {
           {security.revoked.length > 0 && <><p>Revoked keys. Allowing pairing again does not restore trust.</p><ul>{security.revoked.map(id => <li key={id}><span>{id.slice(0, 16)}</span><button type="button" className="secondary" disabled={busy} onClick={() => void operate("secure_unblock", { id })}>Allow new pairing</button></li>)}</ul></>}
         </details>}
       </div>
-      <footer><p>Secure connections only · No file transfer yet</p><p>Free &amp; open source · By Invar Gervi</p></footer>
+      <footer><p>Trusted devices · Single-file transfer</p><p>Free &amp; open source · By Invar Gervi</p></footer>
     </main>
   );
 }

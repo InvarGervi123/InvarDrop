@@ -1,4 +1,5 @@
 pub mod error;
+pub mod files;
 mod identity;
 mod protocol;
 mod store;

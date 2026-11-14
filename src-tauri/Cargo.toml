@@ -19,10 +19,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+blake3 = "1"
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 ring = "0.17"
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "fs", "time", "sync", "macros"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring", "zeroize"] }
 keyring = "4.2"
 zeroize = "1"

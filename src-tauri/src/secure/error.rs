@@ -27,5 +27,13 @@ pub enum Error {
     Limit,
     #[error("Service is not ready")]
     NotReady,
+    #[error("File could not be read or saved")]
+    FileIo,
+    #[error("File name is not safe or portable")]
+    InvalidName,
+    #[error("File size or BLAKE3 verification failed; file was not accepted")]
+    Integrity,
+    #[error("Source file changed during transfer")]
+    FileChanged,
 }
 pub type Result<T> = std::result::Result<T, Error>;

@@ -6,7 +6,7 @@ discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 2.2 (feature branch)
+## Current status — milestone 2.3 (feature branch)
 
 Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
 appear and disappear in the React UI without refresh. Each run advertises a
@@ -19,16 +19,27 @@ trust revocation and explicitly allowing a fresh pairing after revocation.
 The OS credential store protects the master key for encrypted local identity and
 trust state. Linux needs an available, unlocked Secret Service; Windows uses
 Credential Manager. Storage failure disables secure connections without a plaintext
-fallback. The secure listener carries pairing and keepalive messages only.
+fallback.
 
-File/folder transfer, progress, file integrity checks, resuming, conversion,
-extraction and OS sharing integration are **not implemented**. Discovery is
-unauthenticated and does not grant trust or access.
+Trusted devices can send one ordinary file at a time over their existing TLS
+connection. The sender selects a file with a native dialog; the receiver must
+accept each offer. Files stream in bounded 64 KiB chunks, with incremental BLAKE3
+verification before finalization. Received files go to a private, separate receipt
+directory under the profile's `received` folder; the UI shows the local path.
+Existing files are never replaced. File names and destinations cannot be supplied
+as arbitrary filesystem paths through IPC or by the peer.
+
+Both devices need milestone 2.3: ALPN `invardrop/2` and hello version 2 intentionally
+reject old transport versions; stored identities and trust remain compatible.
+Folder transfer, resume, advanced progress, conversion/FFmpeg, extraction and OS
+sharing integration are **not implemented**. Discovery remains unauthenticated.
 
 See [discovery architecture and testing (Russian)](docs/discovery.md) for protocol,
 privacy decisions, expiration/retry behavior, manual tests and limitations.
-See [secure pairing and threat model (Russian)](docs/security.md) for the current
+See [secure pairing and threat model (Russian)](docs/security.md) for the pairing
 transport protocol, storage policy, approval boundaries and validation results.
+See [single-file transfer (Russian)](docs/transfers.md) for the current wire format,
+safe storage, cancellation boundaries, tests and limitations.
 
 The intended product has no accounts, cloud services, advertisements or paid APIs.
 Original files must never be modified by future preparation features.
@@ -51,7 +62,9 @@ rustup component add rustfmt clippy
 ```
 
 Restart the terminal if Rust is not in PATH. A working desktop session is needed
-to open the application. Tray/menu and packaging dependencies will be added only
+to open the application. Native file selection uses the desktop file chooser
+through XDG Desktop Portal (with the dialog library's system-helper fallback).
+Tray/menu and packaging dependencies will be added only
 when those features are enabled.
 
 ### Windows
@@ -103,16 +116,17 @@ milestone 2.2 two-profile runtime scenario and its limitations.
 
 ## Structure and security boundaries
 
-- `src/`: React discovery/pairing UI, snapshots, event subscriptions and explicit security actions.
+- `src/`: React discovery/pairing/transfer UI, snapshots and explicit actions.
 - `src-tauri/src/discovery/`: protocol, bounded device tracker and networking worker.
-- `src-tauri/src/secure/`: identities, encrypted storage, verified TLS and pairing state machine.
+- `src-tauri/src/secure/`: identities, encrypted trust storage, verified TLS,
+  pairing and transfer actors, streaming file IO.
 - `src-tauri/capabilities/`: event listen/unlisten only; no shell/filesystem access.
 - `.github/workflows/ci.yml`: native Linux and Windows build checks.
 
 The production content security policy permits local assets and Tauri IPC only.
 Discovery and secure transport run in Rust. The UI receives display data and
 submits pairing decisions by connection ID; it never receives private keys,
-master keys or routable endpoints. File services will also belong in Rust;
+master keys or routable endpoints. Native file selection and all file IO run in Rust;
 conversion and database dependencies are not introduced in this milestone.
 
 ## CI and distribution
