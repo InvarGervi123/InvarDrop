@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { SecureConnection } from "./useSecurity";
+import { FileTransfer } from "./FileTransfer";
 
 type Operate = (command: string, args: Record<string, unknown>) => Promise<boolean>;
 export function PairCard({ connection: c, operate }: { connection: SecureConnection; operate: Operate }) {
@@ -23,7 +24,8 @@ export function PairCard({ connection: c, operate }: { connection: SecureConnect
         </>}
         {!c.localApproved && !submitted && <button type="button" className="secondary" onClick={() => void operate("secure_respond", { id: c.id, approve: false, code: "" })}>Reject</button>}
       </>}
-      {c.phase === "connected" && <p>Peer key verified. File transfer is not available yet.</p>}
+      {c.phase === "connected" && <p>Peer key verified. Single files up to 4 GiB. The receiver approves each file.</p>}
+      <FileTransfer connection={c} operate={operate} />
       {c.error && <p className="error-text">{c.error}</p>}
       {c.phase !== "closed" && <button type="button" className="secondary" onClick={() => void operate("secure_cancel", { id: c.id })}>{c.phase === "connected" ? "Disconnect" : "Cancel connection"}</button>}
       {c.phase === "closed" && c.canReconnect && <button type="button" className="secondary" onClick={() => void operate("secure_reconnect", { id: c.id })}>Reconnect with pinned key</button>}

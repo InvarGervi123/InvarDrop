@@ -1,5 +1,6 @@
 use super::{
     error::{Error, Result},
+    files::{self, Sink, Source},
     protocol::{self, Message, Pairing},
     store::Store,
     transport,
@@ -26,6 +27,8 @@ use tokio_rustls::TlsStream;
 
 const HANDSHAKE: Duration = Duration::from_secs(5);
 const PAIRING: Duration = Duration::from_secs(90);
+const FILE_APPROVAL: Duration = Duration::from_secs(90);
+const FILE_ACTIVITY: Duration = Duration::from_secs(30);
 const MAX_SESSIONS: usize = 8;
 const MAX_HISTORY: usize = 24;
 pub const EVENT: &str = "security-updated";
@@ -40,6 +43,22 @@ fn store_lock(s: &SharedStore) -> Result<MutexGuard<'_, Store>> {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TransferView {
+    pub id: String,
+    pub direction: String,
+    pub name: String,
+    pub size: u64,
+    pub status: String,
+    pub path: Option<String>,
+    pub error: Option<String>,
+}
+impl TransferView {
+    fn active(&self) -> bool {
+        !matches!(self.status.as_str(), "complete" | "rejected" | "error")
+    }
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Connection {
     pub id: String,
     pub phase: String,
@@ -48,6 +67,7 @@ pub struct Connection {
     pub local_approved: bool,
     pub can_reconnect: bool,
     pub error: Option<String>,
+    pub transfer: Option<TransferView>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +79,7 @@ pub struct Snapshot {
     pub revoked: Vec<String>,
     pub connections: Vec<Connection>,
     pub error: Option<String>,
+    pub receive_directory: String,
 }
 struct Entry {
     view: Connection,
@@ -82,6 +103,7 @@ struct Shared {
     port: Arc<AtomicU16>,
     attempts: Mutex<(Instant, u32)>,
     pairing_duration: Duration,
+    receive_directory: PathBuf,
 }
 pub struct Service {
     shared: Arc<Shared>,
@@ -93,7 +115,7 @@ impl Service {
         port: Arc<AtomicU16>,
         notify: impl Fn(Snapshot) + Send + Sync + 'static,
     ) -> Self {
-        let shared = make_shared(port, Arc::new(notify), PAIRING);
+        let shared = make_shared(port, Arc::new(notify), PAIRING, root.join("received"));
         let s = shared.clone();
         let listener = tauri::async_runtime::spawn(async move {
             let loaded = tokio::task::spawn_blocking(move || Store::open(&root)).await;
@@ -187,7 +209,7 @@ impl Service {
             }
             entry
                 .actions
-                .try_send(Action { approve, code })
+                .try_send(Action::Pairing { approve, code })
                 .map_err(|_| Error::Approval)?;
             if approve {
                 entry.view.local_approved = true;
@@ -208,6 +230,89 @@ impl Service {
             .ok_or(Error::NotReady)?;
         let _ = e.cancel.send(true);
         Ok(())
+    }
+    pub fn can_send_file(&self, id: &str) -> Result<()> {
+        let state = lock(&self.shared.state);
+        let entry = state
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .ok_or(Error::NotReady)?;
+        if entry.view.phase != "connected"
+            || *entry.cancel.borrow()
+            || entry
+                .view
+                .transfer
+                .as_ref()
+                .is_some_and(TransferView::active)
+        {
+            return Err(Error::NotReady);
+        }
+        Ok(())
+    }
+    pub fn send_file(&self, id: &str, source: Source) -> Result<()> {
+        transaction(&self.shared, |state| {
+            let entry = state
+                .entries
+                .iter_mut()
+                .find(|e| e.view.id == id)
+                .ok_or(Error::NotReady)?;
+            if entry.view.phase != "connected"
+                || *entry.cancel.borrow()
+                || entry
+                    .view
+                    .transfer
+                    .as_ref()
+                    .is_some_and(TransferView::active)
+            {
+                return Err(Error::NotReady);
+            }
+            let transfer = TransferView {
+                id: uuid::Uuid::new_v4().to_string(),
+                direction: "outgoing".into(),
+                name: source.name.clone(),
+                size: source.size,
+                status: "offering".into(),
+                path: None,
+                error: None,
+            };
+            entry
+                .actions
+                .try_send(Action::SendFile {
+                    id: transfer.id.clone(),
+                    source: Box::new(source),
+                })
+                .map_err(|_| Error::NotReady)?;
+            entry.view.transfer = Some(transfer);
+            Ok(())
+        })
+    }
+    pub fn respond_file(&self, id: &str, transfer_id: &str, accept: bool) -> Result<()> {
+        transaction(&self.shared, |state| {
+            let entry = state
+                .entries
+                .iter_mut()
+                .find(|e| e.view.id == id)
+                .ok_or(Error::NotReady)?;
+            let transfer = entry.view.transfer.as_mut().ok_or(Error::Approval)?;
+            if entry.view.phase != "connected"
+                || *entry.cancel.borrow()
+                || transfer.id != transfer_id
+                || transfer.direction != "incoming"
+                || transfer.status != "awaiting_approval"
+            {
+                return Err(Error::Approval);
+            }
+            entry
+                .actions
+                .try_send(Action::ReceiveFile {
+                    id: transfer_id.into(),
+                    accept,
+                })
+                .map_err(|_| Error::Approval)?;
+            transfer.status = if accept { "receiving" } else { "rejected" }.into();
+            Ok(())
+        })
     }
     pub async fn revoke(&self, id: String) -> Result<()> {
         let store = get_store(&self.shared)?;
@@ -254,7 +359,12 @@ impl Service {
         update(&self.shared, |st| st.snapshot.status = "stopped".into());
     }
 }
-fn make_shared(port: Arc<AtomicU16>, notify: Notify, pairing_duration: Duration) -> Arc<Shared> {
+fn make_shared(
+    port: Arc<AtomicU16>,
+    notify: Notify,
+    pairing_duration: Duration,
+    receive_directory: PathBuf,
+) -> Arc<Shared> {
     let (stop, _) = watch::channel(false);
     Arc::new(Shared {
         state: Mutex::new(State {
@@ -266,6 +376,7 @@ fn make_shared(port: Arc<AtomicU16>, notify: Notify, pairing_duration: Duration)
                 revoked: vec![],
                 connections: vec![],
                 error: None,
+                receive_directory: receive_directory.to_string_lossy().into_owned(),
             },
             entries: VecDeque::new(),
         }),
@@ -277,6 +388,7 @@ fn make_shared(port: Arc<AtomicU16>, notify: Notify, pairing_duration: Duration)
         port,
         attempts: Mutex::new((Instant::now(), 0)),
         pairing_duration,
+        receive_directory,
     })
 }
 fn transaction<T>(s: &Shared, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
@@ -375,9 +487,10 @@ enum Input {
     Incoming(TcpStream),
     Outgoing(Vec<SocketAddr>, Option<String>),
 }
-struct Action {
-    approve: bool,
-    code: String,
+enum Action {
+    Pairing { approve: bool, code: String },
+    SendFile { id: String, source: Box<Source> },
+    ReceiveFile { id: String, accept: bool },
 }
 fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> Result<String> {
     if *s.stop.borrow() || s.port.load(Ordering::Acquire) == 0 {
@@ -416,6 +529,7 @@ fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> R
                 local_approved: false,
                 can_reconnect: false,
                 error: None,
+                transfer: None,
             },
             contact,
             target: None,
@@ -438,6 +552,12 @@ fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> R
             } else {
                 result.err().map(|e| e.to_string())
             };
+            if let Some(transfer) = &mut e.view.transfer
+                && transfer.active()
+            {
+                transfer.status = "error".into();
+                transfer.error = e.view.error.clone();
+            }
         });
     });
     let mut tasks = lock(&s.tasks);
@@ -506,7 +626,7 @@ async fn connection(
         protocol::send(
             &mut stream,
             &Message::Hello {
-                version: 1,
+                version: 2,
                 initiator,
                 trusted,
             },
@@ -514,7 +634,7 @@ async fn connection(
         .await?;
         match protocol::receive(&mut stream).await? {
             Message::Hello {
-                version: 1,
+                version: 2,
                 initiator: other,
                 trusted: remote,
             } if other != initiator && remote == trusted => Ok(()),
@@ -585,8 +705,8 @@ async fn application<W: tokio::io::AsyncWrite + Unpin>(
             tokio::select! {
                 _=&mut expiry=>return Err(Error::Expired),
                 action=actions.recv()=>{
-                    let action=action.ok_or(Error::Cancelled)?;
-                    let result=pairing.local(action.approve,&action.code,code,Instant::now());
+                    let Action::Pairing{approve,code:provided}=action.ok_or(Error::Cancelled)? else {return Err(Error::Protocol);};
+                    let result=pairing.local(approve,&provided,code,Instant::now());
                     protocol::send(writer,&Message::Decision{approve:result.is_ok()}).await?;
                     result?;view(s,id,|e|e.view.local_approved=true);
                 }
@@ -639,30 +759,11 @@ async fn application<W: tokio::io::AsyncWrite + Unpin>(
         e.view.code = None;
         e.view.can_reconnect = e.target.is_some();
     });
-    let mut tick = tokio::time::interval(Duration::from_secs(5));
-    let mut last_received = Instant::now();
-    let mut window = Instant::now();
-    let mut received = 0;
-    loop {
-        if !store_lock(&store)?.is_trusted(peer) {
-            return Err(Error::Revoked);
-        }
-        tokio::select! {
-            _=tick.tick()=>protocol::send(writer,&Message::Ping{}).await?,
-            _=tokio::time::sleep_until((last_received+Duration::from_secs(20)).into())=>return Err(Error::Expired),
-            message=next(messages)=>{
-                if window.elapsed()>=Duration::from_secs(60){window=Instant::now();received=0;}
-                received+=1;if received>64{return Err(Error::Limit);}
-                last_received=Instant::now();
-                match message? {
-                    Message::Ping{}=>protocol::send(writer,&Message::Pong{}).await?,
-                    Message::Pong{}=>{},
-                    _=>return Err(Error::Protocol),
-                }
-            }
-        }
-    }
+    transfer::run(s, id, peer, writer, messages, actions).await
 }
+
+#[path = "transfer.rs"]
+mod transfer;
 
 #[cfg(test)]
 #[path = "tests.rs"]

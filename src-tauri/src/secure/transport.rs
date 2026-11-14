@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 
-pub const ALPN: &[u8] = b"invardrop/1";
+pub const ALPN: &[u8] = b"invardrop/2";
 /// Unknown keys are QUARANTINED, not trusted. TLS CertificateVerify signatures
 /// remain mandatory. Authority is established by pinned SPKI or out-of-band SAS.
 #[derive(Debug)]
@@ -196,4 +196,35 @@ pub fn peer_and_code(
         .collect::<Vec<_>>()
         .join(" ");
     Ok((peer, code))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn old_transport_alpn_is_rejected_without_fallback() {
+        let server = acceptor(&Identity::generate().unwrap()).unwrap();
+        let identity = Identity::generate().unwrap();
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(QuarantinedVerifier { expected: None }))
+        .with_client_auth_cert(vec![identity.cert()], identity.key())
+        .unwrap();
+        config.alpn_protocols = vec![b"invardrop/1".to_vec()];
+        let client = TlsConnector::from(Arc::new(config));
+        let (a, b) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move { server.accept(a).await });
+        assert!(
+            client
+                .connect("invardrop.local".try_into().unwrap(), b)
+                .await
+                .is_err()
+        );
+        assert!(server.await.unwrap().is_err());
+    }
 }
