@@ -154,6 +154,9 @@ pub enum Event {
     Done,
 }
 impl BundleSource {
+    pub(crate) fn paths(&self) -> Vec<PathBuf> {
+        self.paths.clone()
+    }
     pub async fn folder(path: &Path) -> Result<Self> {
         let root = path.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -511,7 +514,7 @@ fn private_dir(inbox: &Path, prefix: &str) -> Result<TempDir> {
     }
     builder.tempdir_in(inbox).map_err(|_| Error::FileIo)
 }
-fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
         use std::{ffi::CString, os::unix::ffi::OsStrExt};

@@ -14,6 +14,12 @@ use zeroize::Zeroizing;
 
 const MAGIC: &[u8] = b"IVDROP01";
 const MAX_FILE: u64 = 64 * 1024;
+// Resume records have their own key, domain and bound. Absolute source paths
+// may be present, so metadata is never stored as plaintext alongside staging.
+const RESUME_MAGIC: &[u8; 8] = b"IVDRRES1";
+const RESUME_CONTEXT: &str = "io.github.invargervi.invardrop.resume-v1";
+const MAX_RESUME_PLAIN: usize = 8 * 1024 * 1024;
+const RESUME_OVERHEAD: usize = RESUME_MAGIC.len() + 12 + 16;
 const MAX_TRUSTED: usize = 64;
 const MAX_REVOKED: usize = 256;
 
@@ -24,12 +30,15 @@ struct Record {
     identity: Identity,
     trusted: BTreeSet<String>,
     revoked: BTreeSet<String>,
+    #[serde(default)]
+    resume_epoch: u64,
 }
 /// Master key exists only in the OS credential store; disk state is authenticated ciphertext.
 /// The lifetime lock prevents concurrent processes from silently overwriting trust changes.
 pub struct Store {
     path: PathBuf,
     key: aead::LessSafeKey,
+    resume_key: aead::LessSafeKey,
     record: Record,
     _lock: File,
 }
@@ -62,6 +71,12 @@ impl Store {
         let key = aead::LessSafeKey::new(
             aead::UnboundKey::new(&aead::CHACHA20_POLY1305, master).map_err(|_| Error::Corrupt)?,
         );
+        let derived = Zeroizing::new(blake3::derive_key(RESUME_CONTEXT, master));
+        let resume_key = aead::LessSafeKey::new(
+            aead::UnboundKey::new(&aead::CHACHA20_POLY1305, derived.as_ref())
+                .map_err(|_| Error::Corrupt)?,
+        );
+        let mut migrate_resume_epoch = false;
         let record = if exists {
             let mut bytes = Zeroizing::new(Vec::new());
             File::open(&path)
@@ -84,6 +99,17 @@ impl Store {
                     &mut bytes[MAGIC.len() + 12..],
                 )
                 .map_err(|_| Error::Corrupt)?;
+            // Read only this header field separately, ignoring identity fields
+            // without allocating a second copy of private-key strings.
+            #[derive(Deserialize)]
+            struct EpochHeader {
+                #[serde(default)]
+                resume_epoch: Option<u64>,
+            }
+            migrate_resume_epoch = serde_json::from_slice::<EpochHeader>(plaintext)
+                .map_err(|_| Error::Corrupt)?
+                .resume_epoch
+                .is_none();
             serde_json::from_slice::<Record>(plaintext).map_err(|_| Error::Corrupt)?
         } else {
             Record {
@@ -91,6 +117,7 @@ impl Store {
                 identity: Identity::generate()?,
                 trusted: BTreeSet::new(),
                 revoked: BTreeSet::new(),
+                resume_epoch: 0,
             }
         };
         if record.version != 1
@@ -108,13 +135,67 @@ impl Store {
         let store = Self {
             path,
             key,
+            resume_key,
             record,
             _lock: lock,
         };
-        if !exists {
+        // Persist the generation before any checkpoint can be created. Older
+        // binaries reject the new field, preventing downgrade/revoke/unblock
+        // from silently resurrecting epoch-zero resume sessions.
+        if !exists || migrate_resume_epoch {
             store.save(&store.record.trusted, &store.record.revoked)?;
         }
         Ok(store)
+    }
+    /// Every revoke advances this generation; unblock never restores old data.
+    pub(crate) fn resume_epoch(&self) -> u64 {
+        self.record.resume_epoch
+    }
+    fn resume_aad(&self) -> [u8; 16] {
+        let mut aad = [0; 16];
+        aad[..8].copy_from_slice(RESUME_MAGIC);
+        aad[8..].copy_from_slice(&self.resume_epoch().to_be_bytes());
+        aad
+    }
+    pub(crate) fn seal_resume(&self, plain: &[u8]) -> Result<Vec<u8>> {
+        if plain.len() > MAX_RESUME_PLAIN {
+            return Err(Error::Limit);
+        }
+        let nonce = random::<12>()?;
+        let mut bytes = Zeroizing::new(plain.to_vec());
+        self.resume_key
+            .seal_in_place_append_tag(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::from(self.resume_aad()),
+                &mut *bytes,
+            )
+            .map_err(|_| Error::Storage)?;
+        let mut sealed = Vec::with_capacity(plain.len() + RESUME_OVERHEAD);
+        sealed.extend_from_slice(RESUME_MAGIC);
+        sealed.extend_from_slice(&nonce);
+        sealed.extend_from_slice(&bytes);
+        Ok(sealed)
+    }
+    pub(crate) fn open_resume(&self, sealed: &[u8]) -> Result<Vec<u8>> {
+        if sealed.len() < RESUME_OVERHEAD
+            || sealed.len() > MAX_RESUME_PLAIN + RESUME_OVERHEAD
+            || !sealed.starts_with(RESUME_MAGIC)
+        {
+            return Err(Error::Corrupt);
+        }
+        let mut nonce = [0; 12];
+        nonce.copy_from_slice(&sealed[RESUME_MAGIC.len()..RESUME_MAGIC.len() + 12]);
+        // Check the envelope before copying attacker-controlled ciphertext.
+        let mut bytes = Zeroizing::new(sealed[RESUME_MAGIC.len() + 12..].to_vec());
+        let plain = self
+            .resume_key
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::from(self.resume_aad()),
+                &mut bytes,
+            )
+            .map_err(|_| Error::Corrupt)?;
+        Ok(plain.to_vec())
     }
     pub fn identity(&self) -> &Identity {
         &self.record.identity
@@ -159,6 +240,11 @@ impl Store {
         }
         self.record.trusted.remove(id);
         self.record.revoked.insert(id.into());
+        self.record.resume_epoch = self
+            .record
+            .resume_epoch
+            .checked_add(1)
+            .ok_or(Error::Limit)?;
         // On write failure remain revoked in memory and return an explicit persistence error.
         self.save(&self.record.trusted, &self.record.revoked)
     }
@@ -179,6 +265,7 @@ impl Store {
             identity: &'a Identity,
             trusted: &'a BTreeSet<String>,
             revoked: &'a BTreeSet<String>,
+            resume_epoch: u64,
         }
         let mut bytes = Zeroizing::new(
             serde_json::to_vec(&View {
@@ -186,6 +273,7 @@ impl Store {
                 identity: self.identity(),
                 trusted,
                 revoked,
+                resume_epoch: self.resume_epoch(),
             })
             .map_err(|_| Error::Storage)?,
         );
@@ -385,6 +473,154 @@ mod tests {
         assert_eq!(
             fs::metadata(&store.path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+    #[test]
+    fn resume_metadata_is_authenticated_separate_and_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = random::<32>().unwrap();
+        let store = Store::for_test(dir.path(), &master).unwrap();
+        let plain = b"private source path /home/test/selected/secret-file and manifest";
+        let first = store.seal_resume(plain).unwrap();
+        let second = store.seal_resume(plain).unwrap();
+        assert_eq!(store.open_resume(&first).unwrap(), plain);
+        assert_ne!(first, second);
+        assert_ne!(&first[8..20], &second[8..20]);
+        assert!(!first.windows(plain.len()).any(|window| window == plain));
+        assert_eq!(
+            store.open_resume(&store.seal_resume(&[]).unwrap()).unwrap(),
+            b""
+        );
+        for position in [0, RESUME_MAGIC.len(), first.len() - 1] {
+            let mut corrupt = first.clone();
+            corrupt[position] ^= 1;
+            assert!(matches!(store.open_resume(&corrupt), Err(Error::Corrupt)));
+        }
+        for length in [0, RESUME_OVERHEAD - 1, first.len() - 1] {
+            assert!(matches!(
+                store.open_resume(&first[..length]),
+                Err(Error::Corrupt)
+            ));
+        }
+        let oversized = vec![0; MAX_RESUME_PLAIN + 1];
+        assert!(matches!(store.seal_resume(&oversized), Err(Error::Limit)));
+        let oversized = vec![0; MAX_RESUME_PLAIN + RESUME_OVERHEAD + 1];
+        assert!(matches!(store.open_resume(&oversized), Err(Error::Corrupt)));
+        let maximum = vec![0x3a; MAX_RESUME_PLAIN];
+        let sealed = store.seal_resume(&maximum).unwrap();
+        assert_eq!(sealed.len(), MAX_RESUME_PLAIN + RESUME_OVERHEAD);
+        assert_eq!(store.open_resume(&sealed).unwrap(), maximum);
+        // Identity and resume envelopes cannot be substituted in either direction.
+        assert!(matches!(
+            store.open_resume(&fs::read(&store.path).unwrap()),
+            Err(Error::Corrupt)
+        ));
+        let mut nonce = [0; 12];
+        nonce.copy_from_slice(&first[8..20]);
+        let mut cipher = first[20..].to_vec();
+        assert!(
+            store
+                .key
+                .open_in_place(
+                    aead::Nonce::assume_unique_for_key(nonce),
+                    aead::Aad::from(store.resume_aad()),
+                    &mut cipher
+                )
+                .is_err()
+        );
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = Store::for_test(other_dir.path(), &random::<32>().unwrap()).unwrap();
+        assert!(matches!(other.open_resume(&first), Err(Error::Corrupt)));
+    }
+    #[test]
+    fn resume_epoch_persists_and_unblock_cannot_restore_old_checkpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = random::<32>().unwrap();
+        let peer = Identity::generate().unwrap().fingerprint().unwrap();
+        let mut store = Store::for_test(dir.path(), &master).unwrap();
+        store.trust(&peer).unwrap();
+        let checkpoint = store.seal_resume(b"checkpoint").unwrap();
+        assert_eq!(store.resume_epoch(), 0);
+        store.revoke(&peer).unwrap();
+        assert_eq!(store.resume_epoch(), 1);
+        assert!(store.open_resume(&checkpoint).is_err());
+        drop(store);
+        let mut store = Store::for_test(dir.path(), &master).unwrap();
+        assert_eq!(store.resume_epoch(), 1);
+        store.unblock(&peer).unwrap();
+        store.trust(&peer).unwrap();
+        assert_eq!(store.resume_epoch(), 1);
+        assert!(store.open_resume(&checkpoint).is_err());
+        let fresh = store.seal_resume(b"fresh").unwrap();
+        assert_eq!(store.open_resume(&fresh).unwrap(), b"fresh");
+        store.revoke(&peer).unwrap();
+        assert_eq!(store.resume_epoch(), 2);
+        assert!(store.open_resume(&fresh).is_err());
+        // Revoking an already-revoked peer still invalidates all dormant records.
+        store.revoke(&peer).unwrap();
+        assert_eq!(store.resume_epoch(), 3);
+    }
+    #[test]
+    fn failed_revocation_invalidates_resume_in_current_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = random::<32>().unwrap();
+        let peer = Identity::generate().unwrap().fingerprint().unwrap();
+        let mut store = Store::for_test(dir.path(), &master).unwrap();
+        store.trust(&peer).unwrap();
+        let checkpoint = store.seal_resume(b"checkpoint").unwrap();
+        store.path = dir.path().join("missing/identity.enc");
+        assert!(store.revoke(&peer).is_err());
+        assert_eq!(store.resume_epoch(), 1);
+        assert!(!store.is_trusted(&peer));
+        assert!(store.open_resume(&checkpoint).is_err());
+    }
+    #[test]
+    fn legacy_encrypted_record_defaults_resume_epoch_to_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = random::<32>().unwrap();
+        let store = Store::for_test(dir.path(), &master).unwrap();
+        let fingerprint = store.identity().fingerprint().unwrap();
+        let mut record = serde_json::to_value(&store.record).unwrap();
+        record.as_object_mut().unwrap().remove("resume_epoch");
+        let mut cipher = serde_json::to_vec(&record).unwrap();
+        let nonce = random::<12>().unwrap();
+        store
+            .key
+            .seal_in_place_append_tag(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::from(MAGIC),
+                &mut cipher,
+            )
+            .unwrap();
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&nonce);
+        bytes.extend_from_slice(&cipher);
+        fs::write(&store.path, bytes).unwrap();
+        drop(store);
+        let store = Store::for_test(dir.path(), &master).unwrap();
+        assert_eq!(store.resume_epoch(), 0);
+        assert_eq!(store.identity().fingerprint().unwrap(), fingerprint);
+        let bytes = fs::read(&store.path).unwrap();
+        let mut nonce = [0; 12];
+        nonce.copy_from_slice(&bytes[MAGIC.len()..MAGIC.len() + 12]);
+        let mut encrypted = Zeroizing::new(bytes[MAGIC.len() + 12..].to_vec());
+        let plain = store
+            .key
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::from(MAGIC),
+                &mut encrypted,
+            )
+            .unwrap();
+        #[derive(Deserialize)]
+        struct Header {
+            resume_epoch: u64,
+        }
+        assert_eq!(
+            serde_json::from_slice::<Header>(plain)
+                .unwrap()
+                .resume_epoch,
+            0
         );
     }
 }

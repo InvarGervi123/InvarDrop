@@ -1,4 +1,5 @@
 use super::files::CommitGate;
+use super::resume;
 use super::{
     bundle::{BundleSink, BundleSource, Event as BundleEvent, Manifest},
     error::{Error, Result},
@@ -55,6 +56,7 @@ pub struct TransferView {
     pub size: u64,
     pub file_count: u32,
     pub is_folder: bool,
+    pub resuming: bool,
     pub transferred: u64,
     pub bytes_per_second: Option<f64>,
     pub eta_seconds: Option<u64>,
@@ -80,6 +82,7 @@ pub struct Connection {
     pub local_approved: bool,
     pub can_reconnect: bool,
     pub supports_bundles: bool,
+    pub supports_resume: bool,
     pub error: Option<String>,
     pub transfer: Option<TransferView>,
 }
@@ -94,6 +97,21 @@ pub struct Snapshot {
     pub connections: Vec<Connection>,
     pub error: Option<String>,
     pub receive_directory: String,
+    pub resumable: Vec<ResumeView>,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeView {
+    pub id: String,
+    pub peer: String,
+    pub name: String,
+    pub size: u64,
+    pub verified: u64,
+    pub file_count: u32,
+    pub is_folder: bool,
+    pub direction: String,
+    pub requested: bool,
+    pub completed: bool,
 }
 struct Entry {
     view: Connection,
@@ -119,6 +137,8 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     store: Mutex<Option<SharedStore>>,
+    catalog: Mutex<Option<Arc<resume::Catalog>>>,
+    requested: Mutex<std::collections::HashSet<String>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     slots: Arc<Semaphore>,
     stop: watch::Sender<bool>,
@@ -318,6 +338,7 @@ impl Service {
                 size: source.size(),
                 file_count: source.file_count(),
                 is_folder: source.is_folder(),
+                resuming: false,
                 transferred: 0,
                 bytes_per_second: None,
                 eta_seconds: None,
@@ -339,6 +360,145 @@ impl Service {
             entry.view.transfer = Some(transfer);
             Ok(())
         })
+    }
+    pub async fn send_resumable_file(&self, id: &str, path: &std::path::Path) -> Result<()> {
+        let source = Source::open(path).await?;
+        let tree = Manifest {
+            name: source.name.clone(),
+            total: source.size,
+            entries: vec![super::bundle::Entry {
+                path: source.name.clone(),
+                kind: super::bundle::Kind::File,
+                size: source.size,
+            }],
+        };
+        self.prepare_resume(id, tree, vec![source.path().to_owned()], false)
+            .await
+    }
+    pub async fn send_resumable_bundle(&self, id: &str, source: BundleSource) -> Result<()> {
+        self.prepare_resume(id, source.manifest.clone(), source.paths(), true)
+            .await
+    }
+    async fn prepare_resume(
+        &self,
+        id: &str,
+        tree: Manifest,
+        paths: Vec<PathBuf>,
+        folder: bool,
+    ) -> Result<()> {
+        self.can_send_file(id)?;
+        let peer = self
+            .snapshot()
+            .connections
+            .iter()
+            .find(|c| c.id == id && c.supports_resume)
+            .and_then(|c| c.peer.clone())
+            .ok_or(Error::NotReady)?;
+        let catalog = get_catalog(&self.shared)?;
+        let record =
+            tokio::task::spawn_blocking(move || catalog.prepare(&peer, &tree, paths, folder))
+                .await
+                .map_err(|_| Error::FileIo)??;
+        refresh_resumable(&self.shared).await?;
+        self.resume_transfer(id, &record.id).await
+    }
+    pub async fn resume_transfer(&self, id: &str, transfer_id: &str) -> Result<()> {
+        self.can_send_file(id)?;
+        let peer = self
+            .snapshot()
+            .connections
+            .iter()
+            .find(|c| c.id == id && c.supports_resume)
+            .and_then(|c| c.peer.clone())
+            .ok_or(Error::NotReady)?;
+        let catalog = get_catalog(&self.shared)?;
+        let tid = transfer_id.to_owned();
+        let selected_peer = peer.clone();
+        let record = tokio::task::spawn_blocking(move || catalog.get(&selected_peer, &tid))
+            .await
+            .map_err(|_| Error::FileIo)??;
+        transaction(&self.shared, |state| {
+            let entry = state
+                .entries
+                .iter_mut()
+                .find(|e| {
+                    e.view.id == id && e.view.supports_resume && e.view.peer.as_ref() == Some(&peer)
+                })
+                .ok_or(Error::NotReady)?;
+            if *entry.cancel.borrow()
+                || entry.view.phase != "connected"
+                || entry
+                    .view
+                    .transfer
+                    .as_ref()
+                    .is_some_and(|t| t.active() || t.id == record.id)
+            {
+                return Err(Error::Busy);
+            }
+            entry
+                .actions
+                .try_send(Action::Resume {
+                    id: transfer_id.into(),
+                })
+                .map_err(|_| Error::NotReady)?;
+            if record.direction == "outgoing" {
+                entry.gate = Arc::new(CommitGate::default());
+                entry.file_cancelled = false;
+                entry.cancel_notice = None;
+                entry.meter = None;
+                entry.view.transfer = Some(TransferView {
+                    id: record.id.clone(),
+                    direction: "outgoing".into(),
+                    name: record.manifest.tree.name.clone(),
+                    sender_name: None,
+                    size: record.manifest.tree.total,
+                    file_count: record.manifest.tree.file_count(),
+                    is_folder: record.manifest.folder,
+                    resuming: true,
+                    transferred: record.verified(),
+                    bytes_per_second: None,
+                    eta_seconds: None,
+                    status: "offering".into(),
+                    path: None,
+                    error: None,
+                });
+            }
+            Ok(())
+        })
+    }
+
+    pub async fn discard_resume(&self, id: &str) -> Result<()> {
+        {
+            let state = lock(&self.shared.state);
+            if state.entries.iter().any(|e| {
+                e.view
+                    .transfer
+                    .as_ref()
+                    .is_some_and(|t| t.id == id && t.active())
+            }) {
+                return Err(Error::Busy);
+            }
+        }
+        let catalog = get_catalog(&self.shared)?;
+        let record = tokio::task::spawn_blocking({
+            let catalog = catalog.clone();
+            let id = id.to_owned();
+            move || {
+                catalog.list().map(|records| {
+                    records
+                        .into_iter()
+                        .find(|r| r.id == id)
+                        .ok_or(Error::NotReady)
+                })
+            }
+        })
+        .await
+        .map_err(|_| Error::FileIo)???;
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || catalog.discard(&record.peer, &id))
+            .await
+            .map_err(|_| Error::FileIo)??;
+        refresh_resumable(&self.shared).await
     }
     pub fn respond_file(&self, id: &str, transfer_id: &str, accept: bool) -> Result<()> {
         transaction(&self.shared, |state| {
@@ -386,6 +546,7 @@ impl Service {
             }
         });
         refresh_trust(&self.shared)?;
+        let _ = refresh_resumable(&self.shared).await;
         result
     }
     pub async fn unblock(&self, id: String) -> Result<()> {
@@ -415,6 +576,7 @@ impl Service {
                 let _ = task.await;
             }
         }
+        *lock(&self.shared.catalog) = None;
         *lock(&self.shared.store) = None;
         self.shared.port.store(0, Ordering::Release);
         update(&self.shared, |st| st.snapshot.status = "stopped".into());
@@ -436,12 +598,15 @@ fn make_shared(
                 trusted: vec![],
                 revoked: vec![],
                 connections: vec![],
+                resumable: vec![],
                 error: None,
                 receive_directory: receive_directory.to_string_lossy().into_owned(),
             },
             entries: VecDeque::new(),
         }),
         store: Mutex::new(None),
+        catalog: Mutex::new(None),
+        requested: Mutex::new(std::collections::HashSet::new()),
         tasks: Mutex::new(vec![]),
         slots: Arc::new(Semaphore::new(MAX_SESSIONS)),
         stop,
@@ -528,8 +693,19 @@ async fn listen(s: Arc<Shared>, store: SharedStore) -> Result<()> {
     let listener = TcpListener::from_std(listener_socket()?).map_err(|_| Error::Network)?;
     let port = listener.local_addr().map_err(|_| Error::Network)?.port();
     let identity = store_lock(&store)?.identity().fingerprint()?;
+    let profile = s
+        .receive_directory
+        .parent()
+        .ok_or(Error::Storage)?
+        .to_owned();
+    let resume_store = store.clone();
+    let catalog = tokio::task::spawn_blocking(move || resume::Catalog::new(profile, resume_store))
+        .await
+        .map_err(|_| Error::Storage)??;
+    *lock(&s.catalog) = Some(Arc::new(catalog));
     *lock(&s.store) = Some(store);
     refresh_trust(&s)?;
+    refresh_resumable(&s).await?;
     s.port.store(port, Ordering::Release);
     update(&s, |st| {
         st.snapshot.identity = Some(identity);
@@ -551,6 +727,9 @@ enum Input {
     Outgoing(Vec<SocketAddr>, Option<String>),
 }
 enum Action {
+    Resume {
+        id: String,
+    },
     Pairing {
         approve: bool,
         code: String,
@@ -601,6 +780,7 @@ fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> R
                 local_approved: false,
                 can_reconnect: false,
                 supports_bundles: false,
+                supports_resume: false,
                 error: None,
                 transfer: None,
             },
@@ -724,6 +904,8 @@ async fn connection(
         store.is_trusted(&peer)
     };
     let version = if stream.get_ref().1.alpn_protocol() == Some(transport::ALPN) {
+        6
+    } else if stream.get_ref().1.alpn_protocol() == Some(transport::BUNDLE_ALPN) {
         5
     } else {
         4
@@ -751,6 +933,7 @@ async fn connection(
     view(&s, id, |e| {
         e.view.peer = Some(peer.clone());
         e.view.supports_bundles = version >= 5;
+        e.view.supports_resume = version >= 6;
         e.target = target;
     });
     let (mut reader, mut writer) = tokio::io::split(stream);
@@ -808,6 +991,33 @@ async fn connection(
     }
     let _ = timeout(Duration::from_secs(1), writer.shutdown()).await;
     drop(reader_task);
+    if let Some((tid, cancelled)) = {
+        let state = lock(&s.state);
+        state
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .and_then(|e| {
+                e.view
+                    .transfer
+                    .as_ref()
+                    .map(|t| (t.id.clone(), e.file_cancelled))
+            })
+    } && cancelled
+        && let Ok(catalog) = get_catalog(&s)
+    {
+        let peer = peer.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            loop {
+                match catalog.cancel(&peer, &tid) {
+                    Err(Error::Busy) => std::thread::sleep(Duration::from_millis(20)),
+                    result => return result,
+                }
+            }
+        })
+        .await;
+    }
+    let _ = refresh_resumable(&s).await;
     result
 }
 struct AbortTask(JoinHandle<()>);
@@ -903,6 +1113,7 @@ async fn application<W: tokio::io::AsyncWrite + Unpin>(
         e.view.code = None;
         e.view.can_reconnect = e.target.is_some();
     });
+    refresh_resumable(s).await?;
     transfer::run(s, id, peer, writer, messages, actions).await
 }
 
@@ -946,4 +1157,38 @@ fn transport_failed(s: &Shared, id: &str, error: &Error) {
         entry.transport_error = Some(error.to_string());
         entry.cancel.send_replace(true);
     }
+}
+
+fn get_catalog(s: &Shared) -> Result<Arc<resume::Catalog>> {
+    lock(&s.catalog).clone().ok_or(Error::NotReady)
+}
+async fn refresh_resumable(s: &Shared) -> Result<()> {
+    let catalog = get_catalog(s)?;
+    let records = tokio::task::spawn_blocking(move || catalog.list())
+        .await
+        .map_err(|_| Error::FileIo)??;
+    let requested = {
+        let ids: std::collections::HashSet<_> = records.iter().map(|r| r.id.as_str()).collect();
+        let mut requested = lock(&s.requested);
+        requested.retain(|id| ids.contains(id.as_str()));
+        requested.clone()
+    };
+    update(s, |state| {
+        state.snapshot.resumable = records
+            .into_iter()
+            .map(|r| ResumeView {
+                id: r.id.clone(),
+                peer: r.peer.clone(),
+                name: r.manifest.tree.name.clone(),
+                size: r.manifest.tree.total,
+                verified: r.verified(),
+                file_count: r.manifest.tree.file_count(),
+                is_folder: r.manifest.folder,
+                direction: r.direction.clone(),
+                requested: requested.contains(&r.id),
+                completed: r.completed,
+            })
+            .collect()
+    });
+    Ok(())
 }

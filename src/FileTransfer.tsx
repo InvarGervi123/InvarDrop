@@ -54,7 +54,9 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
     catch { setCancelId(null); }
     finally { busy.current = false; setPending(false); }
   };
-  const statusText = waiting ? incoming ? "Waiting for your decision" : "Waiting for the receiver…"
+  const statusText = waiting ? transfer?.resuming
+    ? incoming ? "Waiting for your approval to resume" : "Waiting for receiver approval to resume…"
+    : incoming ? "Waiting for your decision" : "Waiting for the receiver…"
     : transfer?.status === "finalizing" && !incoming ? "Waiting for verification…"
     : labels[transfer?.status ?? ""] ?? "Processing file…";
   const status = transfer?.isFolder ? statusText.replace(/file/g, "folder") : statusText;
@@ -69,20 +71,22 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
       <div className="transfer-metrics" aria-label="Transfer statistics">
         <progress aria-label="File data progress" max={100} value={progressPercent(transfer)} />
         <p>{progressPercent(transfer)}% · {formatBytes(transfer.transferred)} / {formatBytes(transfer.size)}</p>
+        {transfer.resuming && <p>Resuming verified data · {formatBytes(Math.max(0, transfer.size - transfer.transferred))} remaining</p>}
         <p>{transfer.bytesPerSecond === null ? "Speed —" : `${(transfer.bytesPerSecond / 1024 ** 2).toFixed(2)} MiB/s`}
           {transfer.etaSeconds !== null && <> · ETA ~{transfer.etaSeconds} s</>}</p>
       </div>
       {connection.phase === "connected" && active && !(incoming && waiting) && transfer.status !== "committing" && <button type="button" className="secondary" disabled={pending || cancelId === transfer.id || transfer.status === "cancelling"} onClick={() => void cancelTransfer()}>Cancel transfer</button>}
+      {connection.supportsResume && active && <p className="file-hint">Cancel stops this operation and removes incomplete received data. Discard removes a saved recovery record.</p>}
       {transfer.status === "cancelled" && <p className="file-hint">Transfer stopped. Reconnect to send another file.</p>}
       {incoming && waiting && connection.phase === "connected" && <>
-        <label className="comparison-check"><input type="checkbox" checked={confirmedId === transfer.id} disabled={pending || Boolean(answered)} onChange={event => setConfirmedId(event.target.checked ? transfer.id : null)} />I want to save this {transfer.isFolder ? "folder" : "file"}</label>
+        <label className="comparison-check"><input type="checkbox" checked={confirmedId === transfer.id} disabled={pending || Boolean(answered)} onChange={event => setConfirmedId(event.target.checked ? transfer.id : null)} />I want to {transfer.resuming ? "resume" : "save"} this {transfer.isFolder ? "folder" : "file"}</label>
         <div className="request-actions">
-          <button type="button" className="secondary" disabled={pending || Boolean(answered)} onClick={() => void run(false)}>Decline {transfer.isFolder ? "folder" : "file"}</button>
-          <button type="button" disabled={pending || Boolean(answered) || confirmedId !== transfer.id} onClick={() => void run(true)}>Accept {transfer.isFolder ? "folder" : "file"}</button>
+          <button type="button" className="secondary" disabled={pending || Boolean(answered)} onClick={() => void run(false)}>Decline {transfer.resuming ? "resume" : transfer.isFolder ? "folder" : "file"}</button>
+          <button type="button" disabled={pending || Boolean(answered) || confirmedId !== transfer.id} onClick={() => void run(true)}>Accept {transfer.resuming ? "resume" : transfer.isFolder ? "folder" : "file"}</button>
         </div>
-        <p className="file-hint">{answered ? "Decision sent…" : "Nothing is saved until you accept. The request expires after 90 seconds."}</p>
+        <p className="file-hint">{answered ? "Decision sent…" : transfer.resuming ? "Saved data stays isolated. Resume starts only after you accept; declining keeps the recovery data. The request expires after 90 seconds." : "Nothing is saved until you accept. The request expires after 90 seconds."}</p>
       </>}
-      {incoming && ["rejected", "expired"].includes(transfer.status) && <p className="file-hint">No file was saved.</p>}
+      {incoming && ["rejected", "expired"].includes(transfer.status) && <p className="file-hint">{transfer.resuming ? "Resume did not start. Saved recovery data is kept." : "No file was saved."}</p>}
       {transfer.path && <p className="saved-path">Saved to: <span dir="auto">{transfer.path}</span></p>}
       {transfer.error && transfer.status !== "expired" && <p className="error-text" role="alert">{transfer.error}</p>}
     </section>}

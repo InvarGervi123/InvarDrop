@@ -74,7 +74,11 @@ impl Incoming {
         }
     }
 }
+#[path = "resume_transfer.rs"]
+mod resumed;
+
 enum Transfer {
+    Resume(Box<resumed::Transfer>),
     Idle,
     AwaitAccept {
         id: String,
@@ -114,6 +118,7 @@ impl Transfer {
     fn deadline(&self) -> Option<Instant> {
         match self {
             Self::Idle => None,
+            Self::Resume(state) => Some(state.deadline()),
             Self::AwaitAccept { deadline, .. }
             | Self::Sending { deadline, .. }
             | Self::AwaitComplete { deadline, .. }
@@ -200,6 +205,7 @@ fn reserve_offer(
             size,
             file_count: manifest.map_or(1, Manifest::file_count),
             is_folder: manifest.is_some(),
+            resuming: false,
             transferred: 0,
             bytes_per_second: None,
             eta_seconds: None,
@@ -253,7 +259,8 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
         if !store_lock(&store)?.is_trusted(peer) {
             return Err(Error::Revoked);
         }
-        let sending = matches!(transfer, Transfer::Sending { .. });
+        let sending = matches!(transfer, Transfer::Sending { .. })
+            || matches!(&transfer,Transfer::Resume(state) if state.sending());
         let deadline = transfer.deadline();
         tokio::select! {
             _=tick.tick()=>framed.send(&Message::Ping{}).await?,
@@ -262,6 +269,11 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
             // Select readiness, then await a whole read/write. Selecting directly
             // on next_chunk would let keepalives cancel a partially completed read.
             _=std::future::ready(()), if sending=>{
+                if let Transfer::Resume(state)=&mut transfer {
+                    state.send_next(&mut framed,messages).await?;
+                    tick.reset();last_received=Instant::now();
+                    continue;
+                }
                 let Transfer::Sending { id, source, deadline } = &mut transfer else { unreachable!() };
                 match timeout(FILE_ACTIVITY, source.next()).await.map_err(|_|Error::Expired)?? {
                     BundleEvent::Data(data)=>{
@@ -295,6 +307,11 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         transfer=Transfer::AwaitAccept{id,source:*source,deadline:Instant::now()+s.file_approval_duration};
                     }
                     Action::ReceiveFile{id,accept}=>{
+                        if let Transfer::Resume(state)=&mut transfer {
+                            if state.id()!=id {return Err(Error::Protocol);}
+                            if state.respond(accept,&mut framed,messages).await? {transfer=Transfer::Idle;}
+                            tick.reset();last_received=Instant::now();continue;
+                        }
                         let previous=std::mem::replace(&mut transfer,Transfer::Idle);
                         let Transfer::IncomingOffer{id:offered,offer,..}=previous else {return Err(Error::Protocol);};
                         if id!=offered {return Err(Error::Protocol);}
@@ -309,6 +326,17 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                             transfer_view(s,connection,&id,"rejected");
                         }
                     }
+                    Action::Resume{id}=>{
+                        if !matches!(transfer,Transfer::Idle){return Err(Error::Busy);}
+                        let catalog=get_catalog(s)?;let tid=id.clone();let bound=peer.to_owned();
+                        let record=tokio::task::spawn_blocking(move||catalog.get(&bound,&tid)).await.map_err(|_|Error::FileIo)??;
+                        if record.direction=="incoming" {
+                            framed.send(&Message::ResumeRequest{id,digest:record.manifest.digest()}).await?;
+                        }else{
+                            transfer=Transfer::Resume(Box::new(resumed::Transfer::offer(s,connection,peer,id,&mut framed,messages).await?));
+                            tick.reset();last_received=Instant::now();
+                        }
+                    }
                     Action::Pairing{..}=>return Err(Error::Protocol),
                 }
             }
@@ -317,11 +345,38 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                 if last_received.elapsed() >= Duration::from_secs(20) {return Err(Error::Expired);}
                 let message=message?;
                 last_received=Instant::now();
-                if !matches!(message,Message::FileChunk{..}|Message::BundleFileEnd{..}) {
+                if !matches!(message,Message::FileChunk{..}|Message::BundleFileEnd{..}|Message::ResumeCheckpoint{..}|Message::ResumeAck{..}|Message::ResumeFileEnd{..}) {
                     if control_window.elapsed()>=Duration::from_secs(60){control_window=Instant::now();controls=0;}
                     controls+=1;if controls>64{return Err(Error::Limit);}
                 }
+                if matches!(message,Message::ResumeCompleteAck{..}) {
+                    let Message::ResumeCompleteAck{id}=message else {unreachable!()};
+                    let catalog=get_catalog(s)?;let bound=peer.to_owned();
+                    tokio::task::spawn_blocking(move|| {if !catalog.get(&bound,&id)?.completed{return Err(Error::Protocol);}catalog.mark_complete(&bound,&id)}).await.map_err(|_|Error::FileIo)??;
+                    refresh_resumable(s).await?;continue;
+                }
+                if let Transfer::Resume(state)=&mut transfer
+                    && matches!(message,Message::FileChunk{..}|Message::ResumeAccept{..}|Message::ResumeCheckpoint{..}|Message::ResumeAck{..}|Message::ResumeFileEnd{..}|Message::ResumeEnd{..}|Message::ResumeComplete{..}) {
+                    if state.message(message,&mut framed,messages).await? {transfer=Transfer::Idle;}
+                    tick.reset();last_received=Instant::now();continue;
+                }
                 match message {
+                    Message::ResumeRequest{id,digest}=>{
+                        if !supports_resume(s,connection) {return Err(Error::Protocol);}
+                        let catalog=get_catalog(s)?;let bound=peer.to_owned();let tid=id.clone();
+                        let record=tokio::task::spawn_blocking(move||catalog.get(&bound,&tid)).await.map_err(|_|Error::FileIo)??;
+                        if record.direction!="outgoing" || record.manifest.digest()!=digest {return Err(Error::Protocol);}
+                        lock(&s.requested).insert(id);refresh_resumable(s).await?;
+                    }
+                    Message::ResumeOffer{id,manifest,sender_name}=>{
+                        if !supports_resume(s,connection)||!valid_id(&id)||seen_offers.contains(&id){return Err(Error::Protocol);}
+                        validate_sender(&sender_name)?;manifest.validate()?;
+                        if seen_offers.len()>=128{return Err(Error::Limit);}seen_offers.insert(id.clone());
+                        if offer_window.elapsed()>=Duration::from_secs(60){offer_window=Instant::now();offers=0;}offers+=1;if offers>30{return Err(Error::Limit);}
+                        if !matches!(transfer,Transfer::Idle){return Err(Error::Busy);}
+                        if let Some(state)=resumed::Transfer::incoming(s,connection,peer,id,manifest,sender_name,&mut framed,messages).await? {transfer=Transfer::Resume(Box::new(state));}
+                        tick.reset();last_received=Instant::now();
+                    }
                     Message::Ping{}=>framed.send(&Message::Pong{}).await?,
                     Message::Pong{}=>{},
                     Message::FileOffer{id,name,size,sender_name}=>{
@@ -496,4 +551,12 @@ async fn wait_finalization<W: tokio::io::AsyncWrite + Unpin>(
             }
         }
     }
+}
+
+fn supports_resume(s: &Shared, connection: &str) -> bool {
+    lock(&s.state)
+        .entries
+        .iter()
+        .find(|e| e.view.id == connection)
+        .is_some_and(|e| e.view.supports_resume)
 }

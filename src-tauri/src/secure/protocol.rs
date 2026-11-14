@@ -39,6 +39,42 @@ pub enum Message {
     BundleEnd {
         id: String,
     },
+    ResumeOffer {
+        id: String,
+        sender_name: String,
+        manifest: super::resume::Manifest,
+    },
+    ResumeRequest {
+        id: String,
+        digest: String,
+    },
+    ResumeAccept {
+        id: String,
+        accept: bool,
+        position: super::resume::Position,
+    },
+    ResumeCheckpoint {
+        id: String,
+        position: super::resume::Position,
+    },
+    ResumeAck {
+        id: String,
+        position: super::resume::Position,
+    },
+    ResumeFileEnd {
+        id: String,
+        index: u32,
+        hash: String,
+    },
+    ResumeEnd {
+        id: String,
+    },
+    ResumeComplete {
+        id: String,
+    },
+    ResumeCompleteAck {
+        id: String,
+    },
     FileAccept {
         id: String,
         accept: bool,
@@ -61,7 +97,9 @@ pub enum Message {
     },
 }
 fn frame_limit(message: &Message) -> usize {
-    if matches!(message, Message::BundleOffer { .. }) {
+    if matches!(message, Message::ResumeOffer { .. }) {
+        768 * 1024
+    } else if matches!(message, Message::BundleOffer { .. }) {
         super::bundle::MAX_METADATA + 512
     } else {
         MAX_FRAME
@@ -123,7 +161,7 @@ pub async fn receive<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Message> {
         });
     }
     let len = header as usize;
-    if len == 0 || len > super::bundle::MAX_METADATA + 512 {
+    if len == 0 || len > 768 * 1024 {
         return Err(Error::Protocol);
     }
     let mut bytes = vec![0; len];
@@ -315,9 +353,7 @@ mod manifest_tests {
         a.write_u32(bytes.len() as u32).await.unwrap();
         a.write_all(&bytes).await.unwrap();
         assert!(matches!(receive(&mut b).await, Err(Error::Limit)));
-        a.write_u32((super::super::bundle::MAX_METADATA + 513) as u32)
-            .await
-            .unwrap();
+        a.write_u32((768 * 1024 + 1) as u32).await.unwrap();
         assert!(matches!(receive(&mut b).await, Err(Error::Protocol)));
     }
 }

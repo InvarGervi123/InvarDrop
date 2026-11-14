@@ -114,6 +114,7 @@ impl CommitGate {
 }
 
 pub struct Source {
+    path: PathBuf,
     pub name: String,
     pub size: u64,
     file: tokio::fs::File,
@@ -122,6 +123,9 @@ pub struct Source {
     ended: bool,
 }
 impl Source {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
     /// The path comes only from the local native picker. Precheck special files
     /// before opening: opening an obvious FIFO for reading can otherwise block.
     pub async fn open(path: &Path) -> Result<Self> {
@@ -160,6 +164,7 @@ impl Source {
         Ok(Self {
             name,
             size,
+            path: path.to_owned(),
             file,
             remaining: size,
             hasher: blake3::Hasher::new(),

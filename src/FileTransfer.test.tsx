@@ -5,8 +5,8 @@ import { FileTransfer, formatBytes, progressPercent } from "./FileTransfer";
 import type { SecureConnection } from "./useSecurity";
 afterEach(cleanup);
 const connection = (status = "awaiting_approval", id = "one"): SecureConnection => ({
-  id: "connection", phase: "connected", peer: "abc", code: null, localApproved: true, canReconnect: false, supportsBundles: true, error: null,
-  transfer: { id, name: "photo.png", senderName: "InvarDrop sender", size: 1536, fileCount: 1, isFolder: false, direction: "incoming", transferred: 0, bytesPerSecond: null, etaSeconds: null, status, path: null, error: null },
+  id: "connection", phase: "connected", peer: "abc", code: null, localApproved: true, canReconnect: false, supportsBundles: true, supportsResume: true, error: null,
+  transfer: { id, name: "photo.png", senderName: "InvarDrop sender", size: 1536, fileCount: 1, isFolder: false, resuming: false, direction: "incoming", transferred: 0, bytesPerSecond: null, etaSeconds: null, status, path: null, error: null },
 });
 it("renders sender, filename and readable size as text", () => {
   render(<FileTransfer connection={connection()} operate={vi.fn()} />);
@@ -128,4 +128,18 @@ it("declines a folder without approval and cancels the entire active operation",
   fireEvent.click(screen.getByText("Decline folder"));await waitFor(()=>expect(operate).toHaveBeenCalledWith("file_respond",{id:"connection",transferId:"one",accept:false}));
   c.transfer!.status="receiving";view.rerender(<FileTransfer connection={c} operate={operate}/>);fireEvent.click(screen.getByText("Cancel transfer"));fireEvent.click(screen.getByText("Cancel transfer"));
   await waitFor(()=>expect(operate).toHaveBeenCalledWith("file_cancel",{id:"connection",transferId:"one"}));expect(operate).toHaveBeenCalledTimes(2);
+});
+
+
+it("requires fresh approval before resuming and keeps saved data separate from acceptance", async () => {
+  const c=connection();c.transfer!.resuming=true;c.transfer!.transferred=768;
+  const operate=vi.fn().mockResolvedValue(true);render(<FileTransfer connection={c} operate={operate}/>);
+  expect(screen.getByText("Waiting for your approval to resume")).toBeTruthy();expect(screen.getByText("Resuming verified data · 768 B remaining")).toBeTruthy();
+  expect(screen.queryByText("Nothing is saved until you accept. The request expires after 90 seconds.")).toBeNull();
+  fireEvent.click(screen.getByText("Accept resume"));expect(operate).not.toHaveBeenCalled();fireEvent.click(screen.getByRole("checkbox"));expect(operate).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByText("Accept resume"));await waitFor(()=>expect(operate).toHaveBeenCalledExactlyOnceWith("file_respond",{id:"connection",transferId:"one",accept:true}));
+});
+it("declining resume does not tell the user that existing verified data was deleted",()=>{
+  const c=connection("rejected");c.transfer!.resuming=true;render(<FileTransfer connection={c} operate={vi.fn()}/>);
+  expect(screen.getByText("Resume did not start. Saved recovery data is kept.")).toBeTruthy();expect(screen.queryByText("No file was saved.")).toBeNull();
 });
