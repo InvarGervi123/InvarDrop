@@ -8,7 +8,8 @@ use tempfile::{TempDir, TempPath};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const CHUNK_SIZE: usize = 64 * 1024;
-pub const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+pub const MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024 * 1024;
+pub const LEGACY_MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Use the same conservative basename rules on both platforms, including Windows
 /// aliases/ADS and formatting characters that could disguise the confirmation UI.
@@ -76,14 +77,14 @@ impl CommitGate {
     pub fn is_cancelled(&self) -> bool {
         self.state.load(std::sync::atomic::Ordering::SeqCst) == 1
     }
-    fn check(&self) -> Result<()> {
+    pub(crate) fn check(&self) -> Result<()> {
         if self.is_cancelled() {
             Err(Error::Cancelled)
         } else {
             Ok(())
         }
     }
-    fn begin(&self) -> Result<()> {
+    pub(crate) fn begin(&self) -> Result<()> {
         #[cfg(test)]
         if let Some(hook) = self.before.lock().unwrap().take() {
             hook();
@@ -136,9 +137,20 @@ impl Source {
         if !before.is_file() {
             return Err(Error::FileIo);
         }
-        let file = tokio::fs::File::open(path)
-            .await
-            .map_err(|_| Error::FileIo)?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if before.file_attributes() & 0x400 != 0 {
+                return Err(Error::FileIo);
+            }
+        }
+        let mut options = tokio::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(target_os = "linux")]
+        options.custom_flags(libc::O_NOFOLLOW);
+        #[cfg(windows)]
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(path).await.map_err(|_| Error::FileIo)?;
         let metadata = file.metadata().await.map_err(|_| Error::FileIo)?;
         if !metadata.is_file() {
             return Err(Error::FileIo);

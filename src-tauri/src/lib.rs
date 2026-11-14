@@ -74,18 +74,53 @@ async fn secure_unblock(
 #[tauri::command]
 async fn file_choose(id: String, service: tauri::State<'_, secure::Service>) -> Result<(), String> {
     service.can_send_file(&id).map_err(|e| e.to_string())?;
-    let Some(file) = rfd::AsyncFileDialog::new()
-        .set_title("Choose a file to send")
-        .pick_file()
+    let supports_bundles = service
+        .snapshot()
+        .connections
+        .iter()
+        .find(|c| c.id == id)
+        .is_some_and(|c| c.supports_bundles);
+    let dialog = rfd::AsyncFileDialog::new().set_title("Choose files to send");
+    let selected = if supports_bundles {
+        dialog.pick_files().await
+    } else {
+        dialog.pick_file().await.map(|file| vec![file])
+    };
+    let Some(files) = selected else {
+        return Ok(());
+    };
+    if files.len() == 1 {
+        let source = secure::files::Source::open(files[0].path())
+            .await
+            .map_err(|e| e.to_string())?;
+        service.send_file(&id, source).map_err(|e| e.to_string())
+    } else {
+        let paths = files.into_iter().map(|f| f.path().to_owned()).collect();
+        let source = secure::bundle::BundleSource::files(paths)
+            .await
+            .map_err(|e| e.to_string())?;
+        service.send_bundle(&id, source).map_err(|e| e.to_string())
+    }
+}
+#[tauri::command]
+async fn folder_choose(
+    id: String,
+    service: tauri::State<'_, secure::Service>,
+) -> Result<(), String> {
+    service.can_send_file(&id).map_err(|e| e.to_string())?;
+    let Some(folder) = rfd::AsyncFileDialog::new()
+        .set_title("Choose a folder to send")
+        .pick_folder()
         .await
     else {
         return Ok(());
     };
-    let source = secure::files::Source::open(file.path())
+    let source = secure::bundle::BundleSource::folder(folder.path())
         .await
         .map_err(|e| e.to_string())?;
-    service.send_file(&id, source).map_err(|e| e.to_string())
+    service.send_bundle(&id, source).map_err(|e| e.to_string())
 }
+
 #[tauri::command]
 async fn file_respond(
     id: String,
@@ -143,6 +178,7 @@ pub fn run() {
             secure_revoke,
             secure_unblock,
             file_choose,
+            folder_choose,
             file_respond,
             file_cancel
         ])

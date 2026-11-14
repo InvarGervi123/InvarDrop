@@ -1998,6 +1998,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "keyring",
+ "libc",
  "mdns-sd",
  "rcgen",
  "rfd",
@@ -2013,6 +2014,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "uuid",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

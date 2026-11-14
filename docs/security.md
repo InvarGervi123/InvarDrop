@@ -1,5 +1,9 @@
 # Milestone 2.2 — TLS и pairing
 
+Актуальный протокол Milestone 2.6, папки, лимиты и совместимость с 2.5 описаны
+в [large-files-folders.md](large-files-folders.md). Ниже сохранён контекст своего этапа.
+
+
 Документ фиксирует протокол и результаты Milestone 2.2, объединённого в `main`
 через PR #6. В Milestone 2.3 сохранены identity/trust и правила pairing, но транспорт
 использует ALPN `invardrop/2`, hello version 2 и новые файловые сообщения.

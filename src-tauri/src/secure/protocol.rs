@@ -26,6 +26,19 @@ pub enum Message {
         name: String,
         size: u64,
     },
+    BundleOffer {
+        sender_name: String,
+        id: String,
+        manifest: super::bundle::Manifest,
+    },
+    BundleFileEnd {
+        id: String,
+        index: u32,
+        hash: String,
+    },
+    BundleEnd {
+        id: String,
+    },
     FileAccept {
         id: String,
         accept: bool,
@@ -46,6 +59,13 @@ pub enum Message {
     FileComplete {
         id: String,
     },
+}
+fn frame_limit(message: &Message) -> usize {
+    if matches!(message, Message::BundleOffer { .. }) {
+        super::bundle::MAX_METADATA + 512
+    } else {
+        MAX_FRAME
+    }
 }
 pub async fn send<W: AsyncWrite + Unpin>(stream: &mut W, message: &Message) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(20), send_frame(stream, message))
@@ -70,7 +90,7 @@ async fn send_frame<W: AsyncWrite + Unpin>(stream: &mut W, message: &Message) ->
         return stream.flush().await.map_err(|_| Error::Network);
     }
     let bytes = serde_json::to_vec(message).map_err(|_| Error::Protocol)?;
-    if bytes.len() > MAX_FRAME {
+    if bytes.len() > frame_limit(message) {
         return Err(Error::Limit);
     }
     stream
@@ -103,7 +123,7 @@ pub async fn receive<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Message> {
         });
     }
     let len = header as usize;
-    if len == 0 || len > MAX_FRAME {
+    if len == 0 || len > super::bundle::MAX_METADATA + 512 {
         return Err(Error::Protocol);
     }
     let mut bytes = vec![0; len];
@@ -111,7 +131,11 @@ pub async fn receive<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Message> {
         .read_exact(&mut bytes)
         .await
         .map_err(|_| Error::Network)?;
-    serde_json::from_slice(&bytes).map_err(|_| Error::Protocol)
+    let message = serde_json::from_slice(&bytes).map_err(|_| Error::Protocol)?;
+    if len > frame_limit(&message) {
+        return Err(Error::Limit);
+    }
+    Ok(message)
 }
 /// No trust can be committed until both explicit approvals arrive on this channel.
 pub struct Pairing {
@@ -246,5 +270,54 @@ mod tests {
         a.write_all(&[0; 17]).await.unwrap();
         a.shutdown().await.unwrap();
         assert!(matches!(receive(&mut b).await, Err(Error::Network)));
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+    #[tokio::test]
+    async fn extended_frames_allow_only_bounded_manifests() {
+        use super::super::bundle::{Entry, Kind, Manifest};
+        let manifest = Manifest {
+            name: "Many".into(),
+            total: 0,
+            entries: (0..80)
+                .map(|i| Entry {
+                    path: format!("file{i:03}"),
+                    kind: Kind::File,
+                    size: 0,
+                })
+                .collect(),
+        };
+        let message = Message::BundleOffer {
+            id: uuid::Uuid::new_v4().to_string(),
+            sender_name: "Device".into(),
+            manifest,
+        };
+        assert!(serde_json::to_vec(&message).unwrap().len() > MAX_FRAME);
+        let (mut a, mut b) = tokio::io::duplex(128);
+        let task = tokio::spawn(async move {
+            send(&mut a, &message).await.unwrap();
+        });
+        assert!(
+            matches!(receive(&mut b).await.unwrap(),Message::BundleOffer{manifest,..} if manifest.file_count()==80)
+        );
+        task.await.unwrap();
+        let bytes = serde_json::to_vec(&Message::FileOffer {
+            id: "x".repeat(3000),
+            sender_name: "X".into(),
+            name: "file".into(),
+            size: 0,
+        })
+        .unwrap();
+        let (mut a, mut b) = tokio::io::duplex(8192);
+        a.write_u32(bytes.len() as u32).await.unwrap();
+        a.write_all(&bytes).await.unwrap();
+        assert!(matches!(receive(&mut b).await, Err(Error::Limit)));
+        a.write_u32((super::super::bundle::MAX_METADATA + 513) as u32)
+            .await
+            .unwrap();
+        assert!(matches!(receive(&mut b).await, Err(Error::Protocol)));
     }
 }

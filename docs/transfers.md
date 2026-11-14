@@ -1,5 +1,9 @@
 # Milestone 2.3 — передача одного файла
 
+Актуальный протокол Milestone 2.6, папки, лимиты и совместимость с 2.5 описаны
+в [large-files-folders.md](large-files-folders.md). Ниже сохранён контекст своего этапа.
+
+
 Документ фиксирует 2.3. Изменения UI и протокола 2.4 описаны в
 [receiver-acceptance.md](receiver-acceptance.md).
 

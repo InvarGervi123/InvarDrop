@@ -2,16 +2,88 @@
 use super::*;
 use std::collections::HashSet;
 
+pub(super) enum Outgoing {
+    Single(Source),
+    Bundle(BundleSource),
+}
+impl Outgoing {
+    pub(super) fn name(&self) -> &str {
+        match self {
+            Self::Single(s) => &s.name,
+            Self::Bundle(s) => &s.manifest.name,
+        }
+    }
+    pub(super) fn size(&self) -> u64 {
+        match self {
+            Self::Single(s) => s.size,
+            Self::Bundle(s) => s.manifest.total,
+        }
+    }
+    pub(super) fn file_count(&self) -> u32 {
+        match self {
+            Self::Single(_) => 1,
+            Self::Bundle(s) => s.manifest.file_count(),
+        }
+    }
+    pub(super) fn is_folder(&self) -> bool {
+        matches!(self, Self::Bundle(_))
+    }
+    async fn next(&mut self) -> Result<BundleEvent> {
+        match self {
+            Self::Single(s) => Ok(match s.next_chunk().await? {
+                Some(data) => BundleEvent::Data(data),
+                None => BundleEvent::Done,
+            }),
+            Self::Bundle(s) => s.next().await,
+        }
+    }
+}
+enum Offer {
+    Single { name: String, size: u64 },
+    Bundle(Manifest),
+}
+enum Incoming {
+    Single(Sink),
+    Bundle(BundleSink),
+}
+impl Incoming {
+    async fn create(inbox: &std::path::Path, offer: Offer) -> Result<Self> {
+        match offer {
+            Offer::Single { name, size } => {
+                Ok(Self::Single(Sink::create(inbox, &name, size).await?))
+            }
+            Offer::Bundle(manifest) => Ok(Self::Bundle(BundleSink::create(inbox, manifest).await?)),
+        }
+    }
+    async fn write(&mut self, data: &[u8]) -> Result<()> {
+        match self {
+            Self::Single(s) => s.write(data).await,
+            Self::Bundle(s) => s.write(data).await,
+        }
+    }
+    async fn finish(
+        self,
+        hash: Option<String>,
+        gate: Arc<CommitGate>,
+        on_commit: impl FnOnce() + Send + 'static,
+    ) -> Result<PathBuf> {
+        match (self, hash) {
+            (Self::Single(s), Some(hash)) => s.finish_cancellable(&hash, gate, on_commit).await,
+            (Self::Bundle(s), None) => s.finish(gate, on_commit).await,
+            _ => Err(Error::Protocol),
+        }
+    }
+}
 enum Transfer {
     Idle,
     AwaitAccept {
         id: String,
-        source: Source,
+        source: Outgoing,
         deadline: Instant,
     },
     Sending {
         id: String,
-        source: Source,
+        source: Outgoing,
         deadline: Instant,
     },
     AwaitComplete {
@@ -20,13 +92,12 @@ enum Transfer {
     },
     IncomingOffer {
         id: String,
-        name: String,
-        size: u64,
+        offer: Offer,
         deadline: Instant,
     },
     Receiving {
         id: String,
-        sink: Sink,
+        sink: Incoming,
         deadline: Instant,
     },
 }
@@ -100,6 +171,7 @@ fn reserve_offer(
     name: &str,
     size: u64,
     sender: &str,
+    manifest: Option<&Manifest>,
 ) -> Result<bool> {
     transaction(s, |state| {
         let entry = state
@@ -126,6 +198,8 @@ fn reserve_offer(
             name: name.into(),
             sender_name: Some(sender.into()),
             size,
+            file_count: manifest.map_or(1, Manifest::file_count),
+            is_folder: manifest.is_some(),
             transferred: 0,
             bytes_per_second: None,
             eta_seconds: None,
@@ -189,19 +263,23 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
             // on next_chunk would let keepalives cancel a partially completed read.
             _=std::future::ready(()), if sending=>{
                 let Transfer::Sending { id, source, deadline } = &mut transfer else { unreachable!() };
-                match timeout(FILE_ACTIVITY, source.next_chunk()).await.map_err(|_|Error::Expired)?? {
-                    Some(data)=>{
+                match timeout(FILE_ACTIVITY, source.next()).await.map_err(|_|Error::Expired)?? {
+                    BundleEvent::Data(data)=>{
                         let count = data.len();
                         framed.send(&Message::FileChunk{id:id.clone(),data}).await?;
                         progress::record(s, connection, count);
                         *deadline=Instant::now()+FILE_ACTIVITY;
                     }
-                    None=>{
+                    BundleEvent::FileEnd{index,hash}=>{
+                        framed.send(&Message::BundleFileEnd{id:id.clone(),index,hash}).await?;
+                        *deadline=Instant::now()+FILE_ACTIVITY;
+                    }
+                    BundleEvent::Done=>{
                         let id=id.clone();
-                        let hash=source.digest();
-                        framed.send(&Message::FileFinish{id:id.clone(),hash}).await?;
+                        let finish=match source {Outgoing::Single(source)=>Message::FileFinish{id:id.clone(),hash:source.digest()},Outgoing::Bundle(_)=>Message::BundleEnd{id:id.clone()}};
+                        framed.send(&finish).await?;
                         transfer_view(s,connection,&id,"finalizing");
-                        transfer=Transfer::AwaitComplete{id,deadline:Instant::now()+FILE_ACTIVITY};
+                        transfer=Transfer::AwaitComplete{id,deadline:Instant::now()+FINALIZATION};
                     }
                 }
             }
@@ -211,16 +289,17 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                     Action::SendFile{id,source}=>{
                         if !matches!(transfer,Transfer::Idle) {return Err(Error::Protocol);}
                         let sender_name = lock(&s.local_name).clone();
-                        framed.send(&Message::FileOffer{id:id.clone(),name:source.name.clone(),size:source.size,sender_name}).await?;
+                        let offer=match source.as_ref() {Outgoing::Single(source)=>Message::FileOffer{id:id.clone(),name:source.name.clone(),size:source.size,sender_name}, Outgoing::Bundle(source)=>Message::BundleOffer{id:id.clone(),manifest:source.manifest.clone(),sender_name}};
+                        framed.send(&offer).await?;
                         transfer_view(s,connection,&id,"awaiting_approval");
                         transfer=Transfer::AwaitAccept{id,source:*source,deadline:Instant::now()+s.file_approval_duration};
                     }
                     Action::ReceiveFile{id,accept}=>{
                         let previous=std::mem::replace(&mut transfer,Transfer::Idle);
-                        let Transfer::IncomingOffer{id:offered,name,size,..}=previous else {return Err(Error::Protocol);};
+                        let Transfer::IncomingOffer{id:offered,offer,..}=previous else {return Err(Error::Protocol);};
                         if id!=offered {return Err(Error::Protocol);}
                         if accept {
-                            let sink=timeout(FILE_ACTIVITY,Sink::create(&s.receive_directory,&name,size)).await.map_err(|_|Error::Expired)??;
+                            let sink=timeout(FILE_ACTIVITY,Incoming::create(&s.receive_directory,offer)).await.map_err(|_|Error::Expired)??;
                             framed.send(&Message::FileAccept{id:id.clone(),accept:true}).await?;
                             transfer_view(s,connection,&id,"receiving");
                             progress::begin(s, connection);
@@ -238,7 +317,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                 if last_received.elapsed() >= Duration::from_secs(20) {return Err(Error::Expired);}
                 let message=message?;
                 last_received=Instant::now();
-                if !matches!(message,Message::FileChunk{..}) {
+                if !matches!(message,Message::FileChunk{..}|Message::BundleFileEnd{..}) {
                     if control_window.elapsed()>=Duration::from_secs(60){control_window=Instant::now();controls=0;}
                     controls+=1;if controls>64{return Err(Error::Limit);}
                 }
@@ -252,13 +331,28 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         if seen_offers.len()>=128{return Err(Error::Limit);}
                         seen_offers.insert(id.clone());
                         files::validate_name(&name)?;
-                        if size>files::MAX_FILE_SIZE{return Err(Error::Limit);}
+                        let bundles = supports_bundles(s,connection);
+                        if size>files::MAX_FILE_SIZE || (!bundles && size>files::LEGACY_MAX_FILE_SIZE) {return Err(Error::Limit);}
                         if offer_window.elapsed()>=Duration::from_secs(60){offer_window=Instant::now();offers=0;}
                         offers+=1;if offers>30{return Err(Error::Limit);}
-                        if !matches!(transfer,Transfer::Idle)||!reserve_offer(s,connection,&id,&name,size,&sender_name)? {
+                        if !matches!(transfer,Transfer::Idle)||!reserve_offer(s,connection,&id,&name,size,&sender_name,None)? {
                             framed.send(&Message::FileAccept{id,accept:false}).await?;
                         }else{
-                            transfer=Transfer::IncomingOffer{id,name,size,deadline:Instant::now()+s.file_approval_duration};
+                            transfer=Transfer::IncomingOffer{id,offer:Offer::Single{name,size},deadline:Instant::now()+s.file_approval_duration};
+                        }
+                    }
+                    Message::BundleOffer{id,manifest,sender_name}=>{
+                        if !supports_bundles(s,connection) {return Err(Error::Protocol);}
+                        validate_sender(&sender_name)?; manifest.validate()?;
+                        if !valid_id(&id)||seen_offers.contains(&id){return Err(Error::Protocol);}
+                        if seen_offers.len()>=128{return Err(Error::Limit);}
+                        seen_offers.insert(id.clone());
+                        if offer_window.elapsed()>=Duration::from_secs(60){offer_window=Instant::now();offers=0;}
+                        offers+=1;if offers>30{return Err(Error::Limit);}
+                        if !matches!(transfer,Transfer::Idle)||!reserve_offer(s,connection,&id,&manifest.name,manifest.total,&sender_name,Some(&manifest))? {
+                            framed.send(&Message::FileAccept{id,accept:false}).await?;
+                        }else{
+                            transfer=Transfer::IncomingOffer{id,offer:Offer::Bundle(manifest),deadline:Instant::now()+s.file_approval_duration};
                         }
                     }
                     Message::FileAccept{id,accept}=>{
@@ -280,7 +374,14 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         progress::record(s, connection, data.len());
                         *deadline=Instant::now()+FILE_ACTIVITY;
                     }
-                    Message::FileFinish{id,hash}=>{
+                    Message::BundleFileEnd{id,index,hash}=>{
+                        let Transfer::Receiving{id:expected,sink:Incoming::Bundle(sink),deadline}=&mut transfer else {return Err(Error::Protocol);};
+                        if &id!=expected {return Err(Error::Protocol);}
+                        timeout(FILE_ACTIVITY,sink.file_end(index,&hash)).await.map_err(|_|Error::Expired)??;
+                        *deadline=Instant::now()+FILE_ACTIVITY;
+                    }
+                    finish @ (Message::FileFinish{..}|Message::BundleEnd{..})=>{
+                        let (id,hash)=match finish {Message::FileFinish{id,hash}=>(id,Some(hash)),Message::BundleEnd{id}=>(id,None),_=>unreachable!()};
                         let previous=std::mem::replace(&mut transfer,Transfer::Idle);
                         let Transfer::Receiving{id:expected,sink,..}=previous else{return Err(Error::Protocol);};
                         if id!=expected{return Err(Error::Protocol);}
@@ -296,7 +397,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         let (done, result) = tokio::sync::oneshot::channel();
                         let finalize=tokio::spawn(async move {
                             let committing_shared=shared.clone(); let committing_cid=cid.clone(); let committing_id=finished.clone();
-                            let result=sink.finish_cancellable(&hash, gate, move || transfer_view(&committing_shared,&committing_cid,&committing_id,"committing")).await;
+                            let result=sink.finish(hash, gate, move || transfer_view(&committing_shared,&committing_cid,&committing_id,"committing")).await;
                             view(&shared,&cid,|entry|{
                                 entry.finish_running=false;
                                 if let Some(transfer)=&mut entry.view.transfer && transfer.id==finished {
@@ -311,7 +412,10 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                             let _=done.send(result);
                         });
                         lock(&s.tasks).push(finalize);
-                        result.await.map_err(|_|Error::FileIo)??;
+                        wait_finalization(&mut framed,messages,result,&mut last_received,&mut control_window,&mut controls).await?;
+                        // The helper sent keepalives during fsync. Discard elapsed
+                        // outer ticks instead of bursting them at the peer now.
+                        tick.reset();
                         framed.send(&Message::FileComplete{id}).await?;
                     }
                     Message::FileComplete{id}=>{
@@ -352,5 +456,44 @@ impl<W: tokio::io::AsyncWrite + Unpin> TrackedWriter<'_, W> {
             self.idle.store(true, Ordering::SeqCst);
         }
         result
+    }
+}
+
+fn supports_bundles(s: &Shared, connection: &str) -> bool {
+    lock(&s.state)
+        .entries
+        .iter()
+        .find(|e| e.view.id == connection)
+        .is_some_and(|e| e.view.supports_bundles)
+}
+
+// Large-file fsync may take longer than an idle interval. Keep the authenticated
+// channel responsive while the owned finalizer retains the commit/cancel gate.
+const FINALIZATION: Duration = Duration::from_secs(5 * 60);
+async fn wait_finalization<W: tokio::io::AsyncWrite + Unpin>(
+    framed: &mut TrackedWriter<'_, W>,
+    messages: &mut mpsc::Receiver<Result<Message>>,
+    result: tokio::sync::oneshot::Receiver<Result<PathBuf>>,
+    last_received: &mut Instant,
+    window: &mut Instant,
+    controls: &mut u32,
+) -> Result<PathBuf> {
+    tokio::pin!(result);
+    let deadline = tokio::time::sleep(FINALIZATION);
+    tokio::pin!(deadline);
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        tokio::select! {
+            finished=&mut result=>return finished.map_err(|_|Error::FileIo)?,
+            _=&mut deadline=>return Err(Error::Expired),
+            _=tokio::time::sleep_until((*last_received+Duration::from_secs(20)).into())=>return Err(Error::Expired),
+            _=tick.tick()=>framed.send(&Message::Ping{}).await?,
+            message=next(messages)=>{
+                if window.elapsed()>=Duration::from_secs(60){*window=Instant::now();*controls=0;}
+                *controls+=1;if *controls>64{return Err(Error::Limit);}
+                *last_received=Instant::now();
+                match message? {Message::Ping{}=>framed.send(&Message::Pong{}).await?, Message::Pong{}=>{}, _=>return Err(Error::Protocol)}
+            }
+        }
     }
 }
