@@ -7,7 +7,8 @@
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
-    "frontendDist": "../dist"
+    "frontendDist": "../dist",
+    "beforeBundleCommand": "node scripts/prepare-packaging.mjs"
   },
   "app": {
     "windows": [
@@ -29,12 +30,21 @@
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
-      "icons/128x128@2x.png",
+      "icons/256x256.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ],
     "license": "Apache-2.0",
     "shortDescription": "Simple, private LAN file sharing",
-    "publisher": "Invar Gervi"
+    "publisher": "Invar Gervi",
+    "category": "Utility",
+    "homepage": "https://github.com/InvarGervi123/InvarDrop",
+    "longDescription": "Private, account-free file and folder sharing over the local network. Trusted devices, explicit receiver approval, verified streaming and resumable transfers. Optional audio conversion uses a separately selected FFmpeg executable; FFmpeg is not bundled.",
+    "licenseFile": "../LICENSE",
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../docs/packaging.md": "PACKAGING.md"
+    },
+    "createUpdaterArtifacts": false
   }
 }

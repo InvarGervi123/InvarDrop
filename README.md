@@ -6,12 +6,13 @@ discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 2.9 (feature branch)
+## Current status — milestone 3.0 (feature branch)
 
-Milestone 2.8 is merged into `main` through PR #12. Milestone 2.9 refines the
-compact interface, system themes, keyboard focus, error guidance, explicit
-processing choices, and trust/recovery confirmations without changing the secure
-transfer protocol. See [UI/UX changes and validation](docs/ui-ux-polish.md).
+Milestone 2.9 is merged into `main` through PR #13. Milestone 3.0 adds AppImage,
+Debian, NSIS and MSI test installers with package inspection and workflow artifacts.
+See [packaging, prerequisites and limitations](docs/packaging.md). No release is published.
+The compact UI, system themes and explicit confirmations are described in
+[UI/UX changes and validation](docs/ui-ux-polish.md).
 
 Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
 appear and disappear in the React UI without refresh. Each run advertises a
@@ -127,7 +128,17 @@ npm run tauri build -- --no-bundle -- --locked
 ```
 
 Output: `src-tauri/target/release/invardrop` on Linux, `invardrop.exe` on Windows.
-These executables require the platform runtime libraries; they are not portable installers.
+These executables require the platform runtime libraries. Build the native installation
+packages (Linux: AppImage and Debian; Windows: NSIS and MSI) with:
+
+```sh
+npm run test:packaging
+npm run tauri build -- --ci -- --locked
+```
+
+Build/package tooling requires network access on a fresh cache. See
+[packaging instructions](docs/packaging.md) for the Ubuntu 24.04 baseline,
+WebView2 offline prerequisite, data retention and unsigned testing artifacts.
 
 ## Verification
 
@@ -169,8 +180,9 @@ in Rust. No database dependency or automatic processing is introduced.
 
 GitHub Actions checks pull requests and pushes to `main` / `feature/**` on Ubuntu 24.04 and
 Windows Server 2022. It type-checks, builds the native executable, checks Rust
-formatting, runs Clippy and Cargo tests, then uploads per-platform executables with the license and README (retained for
-seven days).
+formatting, runs Clippy, Cargo tests and installer safety checks, inspects package
+payloads and uploads native installers, licenses, instructions, audit reports and
+SHA-256 manifests as testing artifacts retained for seven days.
 Actions are pinned by commit SHA; workflow permissions are read-only.
 Dependabot proposes dependency and workflow updates weekly.
 
@@ -180,7 +192,7 @@ so dependency resolution cannot silently change. Both lockfiles belong in Git.
 
 Public source: [InvarGervi123/InvarDrop](https://github.com/InvarGervi123/InvarDrop).
 No release publication is configured. A later, separately approved release
-workflow may package installers and create a draft GitHub Release.
+workflow may sign and publish approved installers.
 
 ## Local validation — milestone 2.1, 2026-11-12
 

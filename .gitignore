@@ -33,3 +33,7 @@ test-results/
 identity.enc
 profile.lock
 security-v1/
+
+# Packaging-tool bytecode caches
+__pycache__/
+*.py[cod]

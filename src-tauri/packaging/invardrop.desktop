@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name={{name}}
+GenericName=LAN File Sharing
+Comment=Private file and folder sharing on your local network
+Exec={{exec}}
+Icon={{icon}}
+Terminal=false
+Categories=Network;FileTransfer;
+StartupNotify=true
+StartupWMClass=invardrop
