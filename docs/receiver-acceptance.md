@@ -1,63 +1,67 @@
-# Milestone 2.4 — интерфейс согласия получателя
+# Milestone 2.4 — Receiver Acceptance UI
 
-Зафиксировано в PR #8. Текущие дополнения 2.5, версия протокола и новая граница
-отмены описаны в [transfer-progress.md](transfer-progress.md).
+The cancellation/finalization boundaries and current Milestone 2.5 protocol are
+covered in [transfer-progress.md](transfer-progress.md). The historical context of
+Milestone 2.4 (PR #8) is retained below.
 
-Расширен существующий UI 2.3; streaming, BLAKE3, фиксированный inbox и no-clobber
-finalization не переписаны. Incoming request показывает имя отправителя, basename,
-читаемый размер и состояния waiting / accepted / declined / expired / completed /
-failed. Имя передано внутри проверенного TLS, но остаётся **самоназванием peer**:
-его нельзя использовать вместо ключа. Контрольные и bidi-control символы, пустые
-имена и имена длиннее 80 UTF-8 байт отклоняются до публикации запроса.
+## Incoming requests
 
-Имя приложения берётся из текущего local discovery name. Протокол явно обновлён
-до ALPN `invardrop/3`, hello version 3, `file_offer.sender_name`; оба устройства
-нужно обновить. Identity/trust 2.2–2.3 сохраняются, новое pairing не требуется.
-Транспорт 2.3 отклоняется без fallback, что проверено отрицательным TLS-тестом.
+The interface extends the existing Milestone 2.3 transfer workflow without
+rewriting streaming, BLAKE3 verification, the fixed inbox, or no-clobber publication.
+An incoming request clearly shows the sender's device name, filename, and
+human-readable size, with waiting, accepted, declined, expired, completed, and
+failed states. The name arrives over authenticated TLS but is self-reported by the
+peer; it is not a key identity. Empty names, names over 80 UTF-8 bytes, control
+characters, and bidi-control characters are rejected before reaching the view.
 
-Перед Accept нужен unchecked checkbox «I want to save this file». У кнопок
-`type=button`, нет autofocus/формы/default Enter. Decline доступен без checkbox.
-UI блокирует повторный вызов синхронным ref и сохраняет блокировку после успешного
-IPC до нового snapshot. Checkbox привязан к transfer ID и не переносится на новый
-запрос. При ошибке IPC можно повторить действие. Backend независимо проверяет
-phase, transfer ID, направление, отсутствие предыдущего решения и deadline.
+The sender uses its local discovery name. ALPN `invardrop/3`, hello version 3, and
+`file_offer.sender_name` require both applications to update. Identity/trust from
+2.2–2.3 remains valid without pairing again. A negative TLS test verifies rejection
+of the 2.3 transport.
 
-Без Accept Sink не создаётся. После Decline файл не сохраняется; после 90 s без
-решения запрос истекает, сессия закрывается и UI получает `expired`. Данные до
-Accept по-прежнему закрывают соединение. Все границы отмены/finalization и оговорки
-из [transfers.md](transfers.md) сохранены. Состояние «Accepted» не означает успешной
-передачи: завершение отображается только после проверки и сохранения.
+Accept requires a separate, initially unchecked `I want to save this file`
+checkbox. Buttons use `type=button`, with no autofocus, form submission, or default
+Enter action. Decline does not require the checkbox. A synchronous ref prevents
+duplicate actions until a new snapshot arrives, and checkbox consent is bound to
+the transfer ID, so it cannot carry over to a later request. An IPC error permits
+retry; the backend independently validates phase, ID, direction, decision, and
+deadline.
 
-## Проверки
+No sink is created before Accept. Decline saves no file. After 90 seconds, the
+offer expires, the connection closes, and the UI shows `expired`. Premature payload
+data closes the connection. Cancellation/finalization boundaries from
+[transfers.md](transfers.md) remain applicable. Accepted is distinct from Completed:
+completion requires hash verification and successful saving.
 
-`npm test` запускает Vitest/jsdom/Testing Library, также включён в обе платформы CI.
-Проверяются реальные DOM-кнопки, checkbox, повторные действия, ошибка IPC, смена
-request ID, readable size и все терминальные состояния. Rust регрессия проверяет
-истечение настоящего TLS offer без файла, позднее согласие и отсутствие публикации
-запроса с небезопасным sender name. Сохранены отрицательные проверки отказа,
-повреждения, усечения, отключения, overwrite и replay из 2.3.
+## Validation
 
-Для нативного GUI smoke test добавлен `receiver_probe` — диагностический sender
-через обычные Service/Source API. Он находит только явно указанное discovery name,
-принимает команды через stdin (`status`, `approve <receiver code>`, `send`, `quit`).
-Код comparison передаётся тестовым драйвером через pipe без вывода в логи.
-Это позволяет проверить настоящее окно receiver и Tauri IPC без автоматизации
-GTK file picker; этот probe не подключён к production UI.
+`npm test` runs Vitest/jsdom/Testing Library tests in both CI jobs. DOM tests cover
+the consent checkbox, duplicate actions, IPC failure, a new transfer ID, readable sizes, and
+terminal states. Real TLS Rust regressions cover expiration without a file, late
+approval, and unsafe sender names without exposing an offer. Existing negative
+tests from 2.3 for rejection, corrupted/truncated data, disconnection, overwrites,
+and replay remain.
 
-## Фактические результаты — 2026-11-14
+The native `receiver_probe` uses the standard Service/Source API and discovers only
+the explicitly specified discovery name. Its stdin commands are `status`,
+`approve <receiver code>`, `send`, and `quit`; the code travels through a pipe and
+is not logged. This allows testing the actual receiver Tauri IPC without
+automating the GTK picker. The probe is not
+part of the production UI.
 
-Локально: 13 UI-тестов, 59 Rust-тестов, TypeScript, Rustfmt, строгий Clippy
-`--all-targets -- -D warnings` и locked production build прошли.
-Linux production GUI + диагностический sender с настоящим Secret Service,
-реальным mDNS и TLS прошли pairing с проверкой кода без его логирования, отображение
-имени и 1 MiB, блокировку Accept до checkbox, Decline без файла, повторный offer,
-Accept через Tauri IPC, Completed/BLAKE3 и побайтовое сравнение результата.
-Тест повторён в окне receiver 360×420; GUI exit 0. Изолированные тестовые credentials
-удалены. Системные настройки темы не менялись: новые стили используют существующие
-light/dark CSS variables, системный theme workflow 2.1 сохранён.
+## Local results — 2026-11-14
 
-Это полноценный native receiver workflow с программным sender. Нативный picker
-sender, два GUI одновременно на физических устройствах и Windows GUI/keyring
-этой проверкой не покрыты. Неотменяемая finalization, ack loss и crash cleanup
-имеют прежние ограничения 2.3. CI отдельно запускает UI/Rust tests, Clippy,
-TypeScript, Rustfmt и production builds на Linux и Windows.
+13 UI tests, 59 Rust tests, TypeScript, Rustfmt, strict Clippy
+`--all-targets -- -D warnings`, and a locked production build passed. The Linux GUI
+and diagnostic sender used real Secret
+Service, mDNS, and TLS. Tests verified pairing using the full code without logging
+it, the sender name, a 1 MiB offer with Accept disabled until consent, Decline with
+no saved file, and a new offer accepted through IPC with Completed and identical
+BLAKE3/bytes. The GUI was tested repeatedly at 360×420 and exited with code 0;
+isolated test credentials were deleted. Existing CSS retains the system light/dark
+theme behavior introduced in 2.1.
+
+This validates the native receiver workflow with a programmatic sender. It does
+not validate the sender picker, two GUI instances on physical devices, or the
+Windows keyring. The 2.3 limitations around uninterruptible finalization, lost
+acknowledgements, and crash cleanup remain. CI runs the checks on both platforms.

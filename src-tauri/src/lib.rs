@@ -1,4 +1,5 @@
 pub mod discovery;
+mod processing;
 pub mod secure;
 
 use discovery::{Discovery, Snapshot};
@@ -72,7 +73,11 @@ async fn secure_unblock(
 // Filesystem authority stays in Rust: IPC accepts only connection/transfer IDs.
 // A source path can enter this command only through the native picker.
 #[tauri::command]
-async fn file_choose(id: String, service: tauri::State<'_, secure::Service>) -> Result<(), String> {
+async fn file_choose(
+    id: String,
+    processing: tauri::State<'_, processing::Processing>,
+    service: tauri::State<'_, secure::Service>,
+) -> Result<(), String> {
     service.can_send_file(&id).map_err(|e| e.to_string())?;
     let supports_bundles = service
         .snapshot()
@@ -89,6 +94,17 @@ async fn file_choose(id: String, service: tauri::State<'_, secure::Service>) -> 
     let Some(files) = selected else {
         return Ok(());
     };
+    if processing
+        .select(
+            &service,
+            id.clone(),
+            files.iter().map(|f| f.path().to_owned()).collect(),
+            false,
+        )
+        .await?
+    {
+        return Ok(());
+    }
     if files.len() == 1 {
         let source = secure::files::Source::open(files[0].path())
             .await
@@ -129,6 +145,7 @@ async fn file_choose(id: String, service: tauri::State<'_, secure::Service>) -> 
 #[tauri::command]
 async fn folder_choose(
     id: String,
+    processing: tauri::State<'_, processing::Processing>,
     service: tauri::State<'_, secure::Service>,
 ) -> Result<(), String> {
     service.can_send_file(&id).map_err(|e| e.to_string())?;
@@ -139,6 +156,12 @@ async fn folder_choose(
     else {
         return Ok(());
     };
+    if processing
+        .select(&service, id.clone(), vec![folder.path().to_owned()], true)
+        .await?
+    {
+        return Ok(());
+    }
     let source = secure::bundle::BundleSource::folder(folder.path())
         .await
         .map_err(|e| e.to_string())?;
@@ -157,6 +180,59 @@ async fn folder_choose(
     }
 }
 
+#[tauri::command]
+fn processing_dismiss(
+    id: String,
+    processing: tauri::State<'_, processing::Processing>,
+) -> Result<(), String> {
+    processing.dismiss(&id)
+}
+#[tauri::command]
+fn processing_snapshot(
+    processing: tauri::State<'_, processing::Processing>,
+) -> Vec<processing::View> {
+    processing.views()
+}
+#[tauri::command]
+async fn processing_converter(
+    processing: tauri::State<'_, processing::Processing>,
+) -> Result<(), String> {
+    if let Some(file) = rfd::AsyncFileDialog::new()
+        .set_title("Choose a trusted FFmpeg executable (optional)")
+        .pick_file()
+        .await
+    {
+        processing.configure(file.path().to_owned())?;
+    }
+    Ok(())
+}
+#[tauri::command]
+async fn processing_decide(
+    id: String,
+    convert: bool,
+    processing: tauri::State<'_, processing::Processing>,
+    service: tauri::State<'_, secure::Service>,
+) -> Result<(), String> {
+    processing.decide(&service, id, convert).await
+}
+#[tauri::command]
+fn processing_cancel(
+    id: String,
+    processing: tauri::State<'_, processing::Processing>,
+) -> Result<(), String> {
+    processing.cancel(&id)
+}
+#[tauri::command]
+async fn processing_extract(
+    connection_id: String,
+    transfer_id: String,
+    processing: tauri::State<'_, processing::Processing>,
+    service: tauri::State<'_, secure::Service>,
+) -> Result<(), String> {
+    processing
+        .extract(&service, &connection_id, &transfer_id)
+        .await
+}
 #[tauri::command]
 async fn resume_transfer(
     id: String,
@@ -204,6 +280,7 @@ async fn file_cancel(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .manage(processing::Processing::default())
         .setup(|app| {
             let port = Arc::new(AtomicU16::new(0));
             let handle = app.handle().clone();
@@ -235,6 +312,12 @@ pub fn run() {
             secure_revoke,
             secure_unblock,
             file_choose,
+            processing_dismiss,
+            processing_snapshot,
+            processing_converter,
+            processing_decide,
+            processing_cancel,
+            processing_extract,
             resume_transfer,
             resume_discard,
             folder_choose,
@@ -245,6 +328,7 @@ pub fn run() {
         .expect("error while building InvarDrop");
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
+            handle.state::<processing::Processing>().shutdown();
             tauri::async_runtime::block_on(handle.state::<secure::Service>().stop());
             handle.state::<Discovery>().stop();
         }

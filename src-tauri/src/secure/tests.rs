@@ -2039,3 +2039,6 @@ mod resume_regressions;
 
 #[path = "resume_actor_tests.rs"]
 mod resume_actor_regressions;
+
+#[path = "processing_tests.rs"]
+mod processing_regressions;

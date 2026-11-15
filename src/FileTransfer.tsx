@@ -24,6 +24,8 @@ const labels: Record<string, string> = {
 
 export function FileTransfer({ connection, operate }: { connection: SecureConnection; operate: Operate }) {
   const busy = useRef(false);
+  const [extractConfirmed,setExtractConfirmed]=useState<string|null>(null);
+  const [extracted,setExtracted]=useState<string|null>(null);
   const [pending, setPending] = useState(false);
   const [confirmedId, setConfirmedId] = useState<string | null>(null);
   const [respondedId, setRespondedId] = useState<string | null>(null);
@@ -87,6 +89,7 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
         <p className="file-hint">{answered ? "Decision sent…" : transfer.resuming ? "Saved data stays isolated. Resume starts only after you accept; declining keeps the recovery data. The request expires after 90 seconds." : "Nothing is saved until you accept. The request expires after 90 seconds."}</p>
       </>}
       {incoming && ["rejected", "expired"].includes(transfer.status) && <p className="file-hint">{transfer.resuming ? "Resume did not start. Saved recovery data is kept." : "No file was saved."}</p>}
+      {incoming && transfer.status==="complete" && !transfer.isFolder && transfer.name.toLowerCase().endsWith(".zip") && <div><p>Keep the ZIP unchanged, or optionally extract it into a separate folder.</p><label><input type="checkbox" checked={extractConfirmed===transfer.id} onChange={e=>setExtractConfirmed(e.target.checked?transfer.id:null)}/>I want to extract this ZIP</label><button disabled={extractConfirmed!==transfer.id||extracted===transfer.id} onClick={()=>{setExtracted(transfer.id);void operate("processing_extract",{connectionId:connection.id,transferId:transfer.id}).then(ok=>{if(!ok)setExtracted(null);});}}>Extract ZIP</button></div>}
       {transfer.path && <p className="saved-path">Saved to: <span dir="auto">{transfer.path}</span></p>}
       {transfer.error && transfer.status !== "expired" && <p className="error-text" role="alert">{transfer.error}</p>}
     </section>}

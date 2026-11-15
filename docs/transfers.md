@@ -1,115 +1,119 @@
-# Milestone 2.3 — передача одного файла
+# Milestone 2.3 — Single-File Transfer
 
-Актуальное дополнение Milestone 2.7: [восстановление передач](resumable-transfers.md).
+Current Milestone 2.7 supplement: [resumable transfers](resumable-transfers.md).
 
+The Milestone 2.6 protocol, folders, limits, and compatibility with 2.5 are described
+in [large-files-folders.md](large-files-folders.md). The historical context of this
+milestone is retained below.
 
-Актуальный протокол Milestone 2.6, папки, лимиты и совместимость с 2.5 описаны
-в [large-files-folders.md](large-files-folders.md). Ниже сохранён контекст своего этапа.
-
-
-Документ фиксирует 2.3. Изменения UI и протокола 2.4 описаны в
+This document records 2.3. The 2.4 UI and protocol changes are documented in
 [receiver-acceptance.md](receiver-acceptance.md).
 
-## Сценарий и границы
+## Workflow and boundaries
 
-Два экземпляра устанавливают проверенное TLS 1.3 соединение по правилам
-[pairing](security.md). Только после `connected` отправитель нажимает
-`Choose a file to send` и выбирает один обычный файл в нативном диалоге.
-Путь остаётся в Rust: IPC принимает только connection ID, а не путь источника.
-Получатель видит имя и размер и отдельно нажимает `Accept file` или `Decline file`.
-Trust устройства не означает автоматического согласия принимать файлы.
+Two instances establish a verified TLS 1.3 connection using the
+[pairing](security.md) rules. Only after `connected` does the sender click
+`Choose a file to send` and select one regular file in a native dialog.
+The path stays in Rust: IPC accepts only a connection ID, never a source path.
+The receiver sees the name and size and separately clicks `Accept file` or
+`Decline file`. Trusting a device does not automatically authorize incoming files.
 
-Одна активная передача на соединение; после завершения/отказа можно выбрать
-следующий файл, в том числе в обратном направлении. Лимит файла — 4 GiB.
-Пустые файлы допустимы. Каталог, symlink, FIFO и device как источник отклоняются.
-Файлы открываются только для чтения, исходные данные приложение не изменяет.
-Нет папок, очереди файлов, resume, FFmpeg, конвертации или расширенного progress.
+There is one active transfer per connection. After completion/rejection, another
+file may be selected, including in the opposite direction. The file limit is
+4 GiB. Empty files are allowed. Directories, symlinks, FIFOs, and devices are
+rejected as sources. Files are opened read-only; the application never modifies
+source data. This milestone has no folders, file queue, resume, FFmpeg, conversion,
+or advanced progress display.
 
-## Протокол и ресурсы
+## Protocol and resources
 
-Используется **тот же** TLS stream и тот же постоянный reader, что при pairing;
-нет второго data listener, plaintext-сокета или повторного неаутентифицированного
-соединения. Один actor владеет writer, поэтому file chunks и keepalive не смешиваются.
-ALPN — `invardrop/2`, hello version — `2`. Оба устройства должны быть обновлены;
-соединение с транспортом 2.2 закрывается без fallback. Сохранённые SPKI, private
-keys, encrypted trust state и алгоритм pairing-кода не мигрируют.
+The **same** TLS stream and persistent reader used for pairing are reused. There
+is no second data listener, plaintext socket, or new unauthenticated connection.
+One actor owns the writer, preventing file chunks and keepalives from interleaving.
+ALPN is `invardrop/2`, with hello version `2`. Both devices must update; connections
+using the 2.2 transport close without fallback. Persisted SPKI, private keys,
+encrypted trust state, and the pairing-code algorithm require no migration.
 
-Control frames: 4-байтная big-endian длина без старшего бита, затем JSON до 2048
-байт. Дополнительно к hello/decision/ready/ping/pong разрешены:
+Control frames use a 4-byte big-endian length with the high bit clear, followed by
+up to 2048 bytes of JSON. In addition to hello/decision/ready/ping/pong, these are
+allowed:
 
-| Сообщение | Данные |
+| Message | Data |
 | --- | --- |
-| `file_offer` | случайный UUID `id`, проверяемый basename `name`, размер `size` |
+| `file_offer` | Random UUID `id`, validated basename `name`, size `size` |
 | `file_accept` | `id`, boolean `accept` |
-| `file_finish` | `id`, BLAKE3 hex digest потока |
-| `file_complete` | `id`, подтверждение проверенного сохранения получателем |
+| `file_finish` | `id`, BLAKE3 hexadecimal stream digest |
+| `file_complete` | `id`, receiver acknowledgement of verified storage |
 
-Binary chunk: 4-байтная big-endian длина с установленным старшим битом; оставшиеся
-31 бит задают длину payload. Payload — 16 байт UUID и от 1 до 65536 байт данных.
-Границы проверяются **до** выделения буфера. JSON-имитация binary chunk запрещена.
-TCP/TLS сохраняет порядок, размер и digest проверяют весь поток; resume/offset API нет.
+Binary chunks use a 4-byte big-endian length with the high bit set; the remaining
+31 bits specify payload length. The payload is a 16-byte UUID and 1 to 65536 bytes
+of data. Bounds are checked **before** buffer allocation. JSON imitations of binary
+chunks are forbidden. TCP/TLS preserves order; size and digest verify the entire
+stream. There is no resume/offset API.
 
-Очередь reader — 4 frames, UI actions — 2; память не зависит от размера файла.
-BLAKE3 считается инкрементально на обеих сторонах. Нет pre-read всего файла,
-base64 или массивов file contents в React. Ожидание согласия — 90 s, активности
-передачи/подтверждения — 30 s, каждая запись TLS — до 20 s. Сохраняются session,
-handshake и keepalive лимиты 2.2. Binary chunks не расходуют keepalive/control budget.
-Входящие offers ограничены 30/min и 128 уникальными ID за соединение без вытеснения
-старых ID: повтор offer ID закрывает соединение и не может применить старый UI
-approval к другому файлу. После лимита нужно заново подключиться.
+The reader queue holds 4 frames and UI actions 2; memory usage is independent of
+file size. BLAKE3 is computed incrementally on both sides. There is no full-file
+pre-read, base64, or file-content array in React. Approval waits are limited to
+90 s, transfer activity/acknowledgement to 30 s, and each TLS write to 20 s.
+The 2.2 session, handshake, and keepalive limits remain. Binary chunks do not
+consume the keepalive/control budget. Incoming offers are limited to 30/min and
+128 unique IDs per connection without evicting old IDs: a repeated offer ID closes
+the connection and cannot apply old UI approval to another file. Reconnect is
+required after the limit.
 
-## Хранилище и finalization
+## Storage and finalization
 
-Inbox выбирает приложение: `<security profile>/received`, обычно внутри app-data;
-при `INVARDROP_PROFILE` это папка выбранного локального тестового профиля.
-Её путь виден в UI. Ни peer, ни команда IPC не задают destination path.
-После Accept создаётся отдельный случайный каталог `received-*` и tempfile
-внутри него. Одинаковые basename разных передач попадают в разные каталоги.
+The application chooses the inbox: `<security profile>/received`, normally inside
+app-data. With `INVARDROP_PROFILE`, it is within the selected local test profile.
+The UI shows its path. Neither the peer nor IPC can choose a destination path.
+After Accept, a separate random `received-*` directory and a tempfile inside it
+are created. Transfers with identical basenames use separate directories.
 
-Имена ограничены 200 UTF-8 байтами, проверяются одинаково на Linux/Windows.
-Отклоняются traversal/absolute paths, `/`, `\`, ADS `:`, запрещённые Windows
-символы, device aliases (`CON`, `AUX`, `COM1` и т. п.), trailing dot/space,
-control и bidi-control characters. Источник проходит такие же проверки имени.
-Inbox-symlink отклоняется. Компрометация того же локального аккаунта и гонки
-подмены родительских каталогов этим аккаунтом вне модели угроз 2.2.
+Names are limited to 200 UTF-8 bytes and validated identically on Linux/Windows.
+Traversal/absolute paths, `/`, `\`, ADS `:`, forbidden Windows characters, device
+aliases (`CON`, `AUX`, `COM1`, etc.), trailing dots/spaces, control characters, and
+bidi-control characters are rejected. Sources undergo the same filename checks.
+A symlink inbox is rejected. Compromise of the same local account and parent-
+directory replacement races by that account are outside the 2.2 threat model.
 
-Получатель принимает ровно заявленный размер. Данные до Accept, неверный ID,
-лишние байты, truncation, неверный hash и неожиданные фазы — ошибка; готовый файл
-не публикуется. При успехе выполняются flush, `sync_all`, закрытие file handle
-(включая ожидание Tokio IO), затем `TempPath::persist_noclobber` в том же каталоге.
-Существующий файл не заменяется даже при неожиданной локальной коллизии.
-На Unix синхронизируются каталог и его parent; каталоги 0700, файлы 0600.
-На Windows действуют унаследованные ACL профиля, handle закрыт перед переносом.
+The receiver accepts exactly the declared size. Data before Accept, wrong IDs,
+extra bytes, truncation, wrong hashes, and unexpected phases fail without publishing
+a completed file. Success performs flush, `sync_all`, closes the file handle
+(including waiting for Tokio I/O), then calls `TempPath::persist_noclobber` in the
+same directory. Existing files are never replaced, even on an unexpected local
+collision. Unix synchronizes the directory and its parent; directories use mode
+0700 and files 0600. Windows inherits the profile's ACLs and closes the handle before
+moving the file.
 
-Публикация final name атомарна там, где это поддерживает файловая система и
-реализация `persist_noclobber`; общей транзакции между устройствами и гарантии
-crash durability для всех файловых систем нет. Полученные файлы хранятся как
-обычные данные: AEAD identity/trust не шифрует inbox.
+Publication of the final name is atomic where the filesystem and
+`persist_noclobber` implementation support it; there is no shared transaction
+between devices or crash-durability guarantee for every filesystem. Received files
+are ordinary data: identity/trust AEAD does not encrypt the inbox.
 
-## Ошибки, отмена и отключение
+## Errors, cancellation, and disconnection
 
-Decline оставляет TLS-сессию пригодной для следующего файла. Ошибка протокола,
-размера/hash, IO, timeout, Disconnect или Revoke закрывает сессию; незавершённый
-tempfile удаляется при обычном завершении владеющих задач. Готовый файл никогда
-не открывается и не выполняется автоматически.
+Decline leaves TLS ready for another file. Protocol, size/hash, I/O, timeout,
+Disconnect, or Revoke errors close the session; normal completion of the owning
+tasks removes unfinished tempfiles. Completed files are never opened or executed
+automatically.
 
-Перед finalization ещё раз проверяется trust. Уже начатая файловая finalization
-в отдельной владеющей задаче может завершиться после Cancel/Disconnect: задача
-всё равно публикует фактический локальный результат и путь в UI. Отмена не должна
-ложно показывать отсутствие уже сохранённого файла. Отправитель считает передачу
-успешной только после `file_complete`; при потере подтверждения результат у него
-неопределён, хотя у получателя может быть целый проверенный файл. Автоматического
-повтора и удаления сохранённого файла нет.
+Trust is checked again before finalization. Filesystem finalization already started
+in a separate owning task may finish after Cancel/Disconnect: the task still
+publishes the actual local result and path to the UI. Cancellation must not falsely
+suggest that a saved file is absent. The sender considers success only after
+`file_complete`; if acknowledgement is lost, its outcome is uncertain even though
+the receiver may have a complete verified file. There is no automatic retry or
+deletion of the saved file.
 
-При аварийном завершении процесса или неотменяемой операции ОС могут остаться
-staging artifacts; автоматической уборки чужих/старых файлов в этом этапе нет.
-Потеря сети не вызывает resume. Локальная коллизия в staging сохраняет существующий
-файл и удаляет только наш tempfile, поэтому такой каталог может остаться для проверки.
-Изменение размера источника обнаруживается; неизменяемый snapshot источника не
-создаётся. При параллельном изменении тех же байтов BLAKE3 описывает реально
-прочитанный поток, а не прежнюю версию файла.
+Process crashes or uninterruptible OS operations can leave staging artifacts; this
+milestone has no automatic cleanup of other/older files. Network loss never starts
+resume. A local staging collision preserves the existing file and removes only
+our tempfile, so that directory may remain for inspection. Source size changes are
+detected; no immutable source snapshot is created. With concurrent changes to the
+same bytes, BLAKE3 describes the stream actually read, rather than an earlier file
+version.
 
-## Проверки
+## Validation
 
 ```sh
 npm run check
@@ -120,33 +124,34 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 npm run tauri build -- --no-bundle -- --locked
 ```
 
-Автоматические тесты используют реальные TLS sockets, streaming files и BLAKE3;
-master key тестового профиля находится в памяти, как в регрессиях 2.2.
-Нативный picker, Secret Service/Credential Manager и GUI проверяются отдельно.
-Полезный runtime-сценарий: два профиля, pairing/reconnect, выбор пустого и большого
-файла, отказ/приём, побайтовое сравнение результата, повтор basename, Disconnect
-до завершения и Revoke во время приёма. Не печатать pairing-коды или содержимое
-пользовательских файлов в логи.
+Automated tests use real TLS sockets, streaming files, and BLAKE3. Test-profile
+master keys stay in memory, as in the 2.2 regressions. Native pickers, Secret
+Service/Credential Manager, and the GUI are verified separately. A useful runtime
+scenario is two profiles, pairing/reconnect, empty/large file selection, rejection/
+acceptance, byte-for-byte comparison, repeated basenames, Disconnect before
+completion, and Revoke while receiving. Never print pairing codes or user file
+contents in logs.
 
-Библиотеки: [инкрементальный BLAKE3](https://docs.rs/blake3/latest/blake3/struct.Hasher.html),
-[нативный picker rfd](https://docs.rs/rfd/0.18.0/rfd/struct.AsyncFileDialog.html),
-[семантика no-clobber](https://docs.rs/tempfile/latest/tempfile/struct.TempPath.html#method.persist_noclobber).
+Libraries: [incremental BLAKE3](https://docs.rs/blake3/latest/blake3/struct.Hasher.html),
+[native rfd picker](https://docs.rs/rfd/0.18.0/rfd/struct.AsyncFileDialog.html),
+[no-clobber semantics](https://docs.rs/tempfile/latest/tempfile/struct.TempPath.html#method.persist_noclobber).
 
-## Фактическая проверка — 2026-11-14
+## Validation results — 2026-11-14
 
-Локально прошли все 57 Rust-тестов (без ignored), Rustfmt, строгий Clippy
-`--all-targets -- -D warnings`, обе TypeScript-проверки, frontend production build
-и locked Tauri production build без bundle.
+All 57 local Rust tests passed (none ignored), along with Rustfmt, strict Clippy
+`--all-targets -- -D warnings`, both TypeScript checks, frontend production build,
+and a locked Tauri production build without bundles.
 
-Регрессии передают пустой файл и файл из более 70 chunks по одной настоящей
-TLS-сессии, сравнивают результат и неизменность источника. Проверены Decline,
-повтор basename, replay offer ID, данные до Accept, неверные ID/hash, превышение
-размера, короткий поток с правильным hash коротких данных, внезапный обрыв TLS,
-Cancel/Revoke посреди приёма, unsafe names, write failure и no-clobber collision.
+Regressions transfer an empty file and a file exceeding 70 chunks over one real
+TLS session, comparing results and checking unchanged sources. Coverage includes
+Decline, repeated basenames, replayed offer IDs, data before Accept, wrong IDs/
+hashes, excess size, a short stream with the correct hash of its short contents,
+abrupt TLS loss, Cancel/Revoke during reception, unsafe names, write failure, and
+no-clobber collisions.
 
-В Linux GUI ранее проверены два production-процесса с настоящим Secret Service:
-pairing, Reject/Cancel, reconnect и открытие системного file chooser. Полный
-сценарий выбора и передачи файла через GUI не завершён из-за автоматизации GTK;
-его заменяют описанные выше воспроизводимые TLS/файловые тесты. Это не утверждение
-о полном GUI end-to-end тесте. Windows GUI/picker/Credential Manager, два
-физических устройства и сложные сетевые сценарии требуют отдельной проверки.
+Two Linux production GUI processes with real Secret Service were previously tested
+for pairing, Reject/Cancel, reconnect, and opening the system file chooser. The full
+GUI file-selection/transfer workflow was not completed because of GTK automation;
+the reproducible TLS/filesystem tests above provide alternative coverage. This is
+not a claim of a full GUI end-to-end test. Windows GUI/picker/Credential Manager,
+two physical devices, and complex network scenarios need separate verification.

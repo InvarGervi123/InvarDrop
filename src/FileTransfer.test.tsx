@@ -143,3 +143,10 @@ it("declining resume does not tell the user that existing verified data was dele
   const c=connection("rejected");c.transfer!.resuming=true;render(<FileTransfer connection={c} operate={vi.fn()}/>);
   expect(screen.getByText("Resume did not start. Saved recovery data is kept.")).toBeTruthy();expect(screen.queryByText("No file was saved.")).toBeNull();
 });
+
+it('extracts ZIP only after separate approval following successful receipt',async()=>{
+ const c=connection('complete');c.transfer!.name='archive.zip';const operate=vi.fn().mockResolvedValue(true);
+ render(<FileTransfer connection={c} operate={operate}/>);const extract=screen.getByText('Extract ZIP') as HTMLButtonElement;expect(extract.disabled).toBe(true);fireEvent.click(extract);expect(operate).not.toHaveBeenCalled();
+ fireEvent.click(screen.getByText('I want to extract this ZIP'));fireEvent.click(extract);fireEvent.click(extract);await waitFor(()=>expect(operate).toHaveBeenCalledExactlyOnceWith('processing_extract',{connectionId:'connection',transferId:'one'}));
+});
+it('does not offer ZIP extraction before verification or on the sender',()=>{const c=connection('receiving');c.transfer!.name='archive.zip';const view=render(<FileTransfer connection={c} operate={vi.fn()}/>);expect(screen.queryByText('Extract ZIP')).toBeNull();c.transfer!.status='complete';c.transfer!.direction='outgoing';view.rerender(<FileTransfer connection={c} operate={vi.fn()}/>);expect(screen.queryByText('Extract ZIP')).toBeNull();});

@@ -1,3 +1,4 @@
+import {ProcessingPanel} from "./ProcessingPanel";
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
@@ -27,6 +28,7 @@ function App() {
       <header><span className="mark" aria-hidden="true">↓</span><h1>InvarDrop</h1><p>File sharing. Close to home.</p></header>
       <div className="workspace">
         {visibleConnections.map(c => <PairCard key={c.id} connection={c} operate={operate} />)}
+        <ProcessingPanel/>
         {security && <ResumeTransfers snapshot={security} operate={operate} />}
         <section aria-labelledby="devices-title" className="empty-state">
           <span className="status" role="status">{unavailable ? "Discovery unavailable" : snapshot?.status === "searching" ? "Looking nearby" : "Starting discovery"}</span>

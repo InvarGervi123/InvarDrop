@@ -6,7 +6,7 @@ discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 2.7 (feature branch)
+## Current status — milestone 2.8 (feature branch)
 
 Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
 appear and disappear in the React UI without refresh. Each run advertises a
@@ -47,17 +47,19 @@ Revoking trust invalidates old checkpoints. Limits: 8 recovery records, 2 TiB to
 declared size, and 7 days of inactivity. Source and staging verification can require
 substantial disk IO; resume avoids retransmitting verified data, not rereading it.
 
-Compression, conversion/FFmpeg, extraction and OS sharing integration are
-**not implemented**. See [resumable transfers (Russian)](docs/resumable-transfers.md)
+Optional OGG-to-MP3 conversion and post-transfer ZIP extraction are implemented
+with separate explicit approval. FFmpeg is selected locally and is not bundled.
+See [processing dependencies and security limits](docs/optional-file-processing.md).
+Compression and OS sharing integration are **not implemented**. See [resumable transfers](docs/resumable-transfers.md)
 for consent, encrypted metadata, recovery, cleanup, limits and security considerations.
-See [large files and folders (Russian)](docs/large-files-folders.md) for the 2.6
+See [large files and folders](docs/large-files-folders.md) for the 2.6
 protocol and storage foundations.
 
-See [discovery architecture and testing (Russian)](docs/discovery.md) for protocol,
+See [discovery architecture and testing](docs/discovery.md) for protocol,
 privacy decisions, expiration/retry behavior, manual tests and limitations.
-See [secure pairing and threat model (Russian)](docs/security.md) for the pairing
+See [secure pairing and threat model](docs/security.md) for the pairing
 transport protocol, storage policy, approval boundaries and validation results.
-See [single-file transfer (Russian)](docs/transfers.md) for the initial wire format,
+See [single-file transfer](docs/transfers.md) for the initial wire format,
 safe storage, cancellation boundaries, tests and limitations.
 
 The intended product has no accounts, cloud services, advertisements or paid APIs.
@@ -65,11 +67,11 @@ Original files must never be modified by future preparation features.
 
 Incoming requests show the device-reported sender name, readable size and explicit
 Accept/Decline states. Acceptance requires confirming the specific file; expired
-requests cannot be approved. See [receiver acceptance (Russian)](docs/receiver-acceptance.md).
+requests cannot be approved. See [receiver acceptance](docs/receiver-acceptance.md).
 
 Transfers display measured bytes, data percentage, MiB/s and ETA when reliable,
 with a Cancel action on both sides. A cancelled transfer closes the TLS session.
-See [progress and cancellation (Russian)](docs/transfer-progress.md) for finalization
+See [progress and cancellation](docs/transfer-progress.md) for finalization
 races, testing and limitations.
 
 ## Development
@@ -155,7 +157,8 @@ The production content security policy permits local assets and Tauri IPC only.
 Discovery and secure transport run in Rust. The UI receives display data and
 submits pairing decisions by connection ID; it never receives private keys,
 master keys or routable endpoints. Native file selection and all file IO run in Rust;
-conversion and database dependencies are not introduced in this milestone.
+Audio conversion invokes an explicitly selected FFmpeg process; ZIP parsing stays
+in Rust. No database dependency or automatic processing is introduced.
 
 ## CI and distribution
 
@@ -214,3 +217,7 @@ same process/window, using matching GTK and desktop preferences. Original deskto
 settings were restored afterward. Both palettes fit at 360 × 420; text/background
 contrast is at least 5.97:1 for all text color pairs. Windows runtime testing is
 still pending; no claim of a local Windows test is made.
+
+Optional OGG-to-MP3 preparation and post-transfer ZIP extraction require separate
+explicit approval. FFmpeg is optional, selected locally, and not bundled.
+See [processing dependencies, security limits and tests](docs/optional-file-processing.md).

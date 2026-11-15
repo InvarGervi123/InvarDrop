@@ -154,6 +154,13 @@ pub enum Event {
     Done,
 }
 impl BundleSource {
+    pub(crate) fn from_manifest_paths(tree: Manifest, paths: Vec<PathBuf>) -> Result<Self> {
+        if tree.entries.len() != paths.len() {
+            return Err(Error::Protocol);
+        }
+        tree.validate()?;
+        Self::new(tree.name, tree.entries, paths)
+    }
     pub(crate) fn paths(&self) -> Vec<PathBuf> {
         self.paths.clone()
     }

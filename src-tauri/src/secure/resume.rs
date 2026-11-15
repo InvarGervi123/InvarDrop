@@ -320,6 +320,24 @@ fn full_hash_checked(path: &Path, size: u64, gate: Option<&CommitGate>) -> Resul
     Ok(hash)
 }
 impl Catalog {
+    pub(crate) fn prepared_references(&self) -> Result<Vec<PathBuf>> {
+        let _guard = lock(&self.mutex);
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(&self.root)
+            .map_err(|_| Error::Storage)?
+            .take(64)
+        {
+            let entry = entry.map_err(|_| Error::Storage)?;
+            let id = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| Error::Corrupt)?;
+            let record = self.read(&id, None)?;
+            paths.extend(record.paths);
+        }
+        Ok(paths)
+    }
+
     /// root is the security profile directory, not the checkpoint subdirectory.
     pub fn new(root: PathBuf, store: Arc<Mutex<Store>>) -> Result<Self> {
         if !root.is_absolute() {
