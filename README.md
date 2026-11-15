@@ -47,8 +47,10 @@ Revoking trust invalidates old checkpoints. Limits: 8 recovery records, 2 TiB to
 declared size, and 7 days of inactivity. Source and staging verification can require
 substantial disk IO; resume avoids retransmitting verified data, not rereading it.
 
-Compression, conversion/FFmpeg, extraction and OS sharing integration are
-**not implemented**. See [resumable transfers (Russian)](docs/resumable-transfers.md)
+Optional OGG-to-MP3 conversion and post-transfer ZIP extraction are implemented
+with separate explicit approval. FFmpeg is selected locally and is not bundled.
+See [processing dependencies and security limits (Russian)](docs/optional-file-processing.md).
+Compression and OS sharing integration are **not implemented**. See [resumable transfers (Russian)](docs/resumable-transfers.md)
 for consent, encrypted metadata, recovery, cleanup, limits and security considerations.
 See [large files and folders (Russian)](docs/large-files-folders.md) for the 2.6
 protocol and storage foundations.
@@ -155,7 +157,8 @@ The production content security policy permits local assets and Tauri IPC only.
 Discovery and secure transport run in Rust. The UI receives display data and
 submits pairing decisions by connection ID; it never receives private keys,
 master keys or routable endpoints. Native file selection and all file IO run in Rust;
-conversion and database dependencies are not introduced in this milestone.
+Audio conversion invokes an explicitly selected FFmpeg process; ZIP parsing stays
+in Rust. No database dependency or automatic processing is introduced.
 
 ## CI and distribution
 

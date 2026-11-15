@@ -1061,78 +1061,81 @@ mod tests {
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 1);
     }
     #[test]
-    fn actual_vorbis_to_mp3_decodes_and_preserves_source() {
-        let binary = std::env::var_os("INVARDROP_TEST_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
-        let binary = PathBuf::from(binary);
-        let d = tempfile::tempdir().unwrap();
-        let source = d.path().join("tone.ogg");
-        assert!(
-            Command::new(&binary)
-                .args([
-                    "-v",
-                    "error",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "sine=frequency=440:duration=2",
-                    "-c:a",
-                    "libvorbis"
-                ])
-                .arg(&source)
-                .status()
-                .unwrap()
-                .success(),
-            "FFmpeg test dependency with libvorbis/libmp3lame is required"
-        );
-        check_ogg(&source).unwrap();
-        let before = fs::read(&source).unwrap();
-        let size = before.len() as u64;
-        let tree = Manifest {
-            name: "tone.ogg".into(),
-            total: size,
-            entries: vec![bundle::Entry {
-                path: "tone.ogg".into(),
-                kind: Kind::File,
-                size,
-            }],
-        };
-        let out = d.path().join("prepared");
-        convert_tree(
-            &binary,
-            &tree,
-            std::slice::from_ref(&source),
-            &out,
-            false,
-            &CommitGate::default(),
-            || {},
-        )
-        .unwrap();
-        assert_eq!(fs::read(&source).unwrap(), before);
-        let mp3 = out.join("tone.mp3");
-        assert!(mp3.is_file());
-        let pcm = d.path().join("pcm");
-        assert!(
-            Command::new(binary)
-                .args(["-v", "error", "-i"])
-                .arg(mp3)
-                .args(["-f", "f32le", "-ac", "1", "-ar", "44100"])
-                .arg(&pcm)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let bytes = fs::read(pcm).unwrap();
-        let seconds = bytes.len() as f64 / 4.0 / 44100.0;
-        assert!((1.9..2.1).contains(&seconds));
-        let rms = (bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| f32::from_le_bytes(*b) as f64)
-            .map(|v| v * v)
-            .sum::<f64>()
-            / (bytes.len() / 4) as f64)
-            .sqrt();
-        assert!((0.05..0.15).contains(&rms));
+    fn actual_vorbis_and_opus_to_mp3_decode_and_preserve_source() {
+        for codec in ["libvorbis", "libopus"] {
+            let binary =
+                std::env::var_os("INVARDROP_TEST_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+            let binary = PathBuf::from(binary);
+            let d = tempfile::tempdir().unwrap();
+            let source = d.path().join("tone.ogg");
+            assert!(
+                Command::new(&binary)
+                    .args([
+                        "-v",
+                        "error",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "sine=frequency=440:duration=2",
+                        "-c:a",
+                        codec
+                    ])
+                    .arg(&source)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "FFmpeg test dependency with libvorbis/libmp3lame is required"
+            );
+            check_ogg(&source).unwrap();
+            let before = fs::read(&source).unwrap();
+            let size = before.len() as u64;
+            let tree = Manifest {
+                name: "tone.ogg".into(),
+                total: size,
+                entries: vec![bundle::Entry {
+                    path: "tone.ogg".into(),
+                    kind: Kind::File,
+                    size,
+                }],
+            };
+            let out = d.path().join("prepared");
+            convert_tree(
+                &binary,
+                &tree,
+                std::slice::from_ref(&source),
+                &out,
+                false,
+                &CommitGate::default(),
+                || {},
+            )
+            .unwrap();
+            assert_eq!(fs::read(&source).unwrap(), before);
+            let mp3 = out.join("tone.mp3");
+            assert!(mp3.is_file());
+            let pcm = d.path().join("pcm");
+            assert!(
+                Command::new(binary)
+                    .args(["-v", "error", "-i"])
+                    .arg(mp3)
+                    .args(["-f", "f32le", "-ac", "1", "-ar", "44100"])
+                    .arg(&pcm)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let bytes = fs::read(pcm).unwrap();
+            let seconds = bytes.len() as f64 / 4.0 / 44100.0;
+            assert!((1.9..2.1).contains(&seconds));
+            let rms = (bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b) as f64)
+                .map(|v| v * v)
+                .sum::<f64>()
+                / (bytes.len() / 4) as f64)
+                .sqrt();
+            assert!((0.05..0.15).contains(&rms));
+        }
     }
 }
