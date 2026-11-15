@@ -63,7 +63,7 @@ jobs:
         run: npm run tauri build -- --ci -- --locked
       - name: Lint Rust
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - name: Test Rust
+      - name: Test Rust and independent-device TLS processes
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Inspect Linux package payloads
         if: runner.os == 'Linux'

@@ -1174,6 +1174,10 @@ mod transfer;
 #[path = "tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "cross_device_tests.rs"]
+pub(super) mod cross_device_tests;
+
 fn request_file_cancel(s: &Shared, id: &str, transfer_id: &str, notify_peer: bool) -> Result<()> {
     transaction(s, |state| {
         let entry = state
