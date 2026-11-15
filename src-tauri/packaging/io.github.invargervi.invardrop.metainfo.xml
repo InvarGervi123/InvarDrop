@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.invargervi.invardrop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>InvarDrop</name>
+  <summary>Private file and folder sharing on your local network</summary>
+  <developer id="io.github.invargervi"><name>Invar Gervi</name></developer>
+  <description>
+    <p>Share files and folders between explicitly trusted devices over an authenticated local connection. Each incoming transfer requires your approval.</p>
+    <p>Transfers stream in bounded chunks with integrity verification and recovery checkpoints. No account, cloud service or telemetry is required.</p>
+  </description>
+  <launchable type="desktop-id">InvarDrop.desktop</launchable>
+  <provides><binary>invardrop</binary></provides>
+  <url type="homepage">https://github.com/InvarGervi123/InvarDrop</url>
+  <content_rating type="oars-1.1"/>
+</component>
