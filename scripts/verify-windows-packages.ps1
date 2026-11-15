@@ -1,5 +1,11 @@
 param([switch]$SelfTest)
 $ErrorActionPreference = 'Stop'
+function Get-ExpectedMsiVersion([string]$AppVersion, [string]$WixVersion) {
+    $core = [version]($AppVersion -replace '[-+].*$', '')
+    $numeric = if ($WixVersion) { [version]$WixVersion } else { [version]$AppVersion }
+    if ($numeric.ToString(3) -ne $core.ToString(3)) { throw 'MSI version core differs from application version' }
+    return $numeric
+}
 function Get-PackageFileHash([string]$FilePath) {
     $result = Get-FileHash -LiteralPath $FilePath -Algorithm SHA256
     if (-not $result -or -not $result.Hash) { throw "Could not hash package file: $FilePath" }
@@ -12,7 +18,10 @@ if ($SelfTest) {
         [IO.File]::WriteAllBytes($temporary, $bytes)
         $expected = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
         if ((Get-PackageFileHash $temporary) -ne $expected) { throw 'Literal archive filename hash regression failed' }
+        if ((Get-ExpectedMsiVersion '0.1.0-beta.1' '0.1.0.1') -ne [version]'0.1.0.1') { throw 'Beta MSI version mapping failed' }
+        if ((Get-ExpectedMsiVersion '0.1.0' '') -ne [version]'0.1.0') { throw 'Stable MSI version mapping failed' }
         Write-Output 'PASS: literal-path hashing of archive filenames containing square brackets'
+        Write-Output 'PASS: prerelease and stable MSI numeric version mapping'
     } finally { Remove-Item -LiteralPath $temporary -Force }
     return
 }
@@ -20,7 +29,9 @@ $root = Split-Path $PSScriptRoot -Parent
 $bundle = Join-Path $root 'src-tauri/target/release/bundle'
 $packages = @(Get-ChildItem "$bundle/nsis/*.exe") + @(Get-ChildItem "$bundle/msi/*.msi")
 if ($packages.Count -ne 2) { throw 'Expected one NSIS and one MSI installer' }
-$expectedVersion = [version]((Get-Content (Join-Path $root 'src-tauri/tauri.conf.json') -Raw | ConvertFrom-Json).version)
+$appConfig = Get-Content (Join-Path $root 'src-tauri/tauri.conf.json') -Raw | ConvertFrom-Json
+$windowsConfig = Get-Content (Join-Path $root 'src-tauri/tauri.windows.conf.json') -Raw | ConvertFrom-Json
+$expectedVersion = Get-ExpectedMsiVersion $appConfig.version $windowsConfig.bundle.windows.wix.version
 $report = [ordered]@{}
 $auditTempBase = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 function Read-MsiRows($Database, [string]$Query, [int]$Columns) {
@@ -58,7 +69,7 @@ foreach ($package in $packages) {
             $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($package.FullName, 0))
             $properties = @{}
             Read-MsiRows $database 'SELECT `Property`, `Value` FROM `Property`' 2 | ForEach-Object { $properties[$_[0]] = $_[1] }
-            if ($properties.ProductName -ne 'InvarDrop' -or ([version]$properties.ProductVersion).ToString(3) -ne $expectedVersion.ToString(3) -or $properties.UpgradeCode.Trim('{}').ToLowerInvariant() -ne 'f74d5dcd-8cbd-51e8-8063-b651b39e44ef') { throw 'Unexpected MSI identity or upgrade code' }
+            if ($properties.ProductName -ne 'InvarDrop' -or [version]$properties.ProductVersion -ne $expectedVersion -or $properties.UpgradeCode.Trim('{}').ToLowerInvariant() -ne 'f74d5dcd-8cbd-51e8-8063-b651b39e44ef') { throw 'Unexpected MSI identity, version or upgrade code' }
             $payload = @(Read-MsiRows $database 'SELECT `FileName`, `FileSize` FROM `File`' 2)
             foreach ($entry in $payload) {
                 $name = ($entry[0] -split '\|')[-1]

@@ -24,7 +24,8 @@
       "wix": {
         "upgradeCode": "f74d5dcd-8cbd-51e8-8063-b651b39e44ef",
         "language": "en-US",
-        "enableElevatedUpdateTask": false
+        "enableElevatedUpdateTask": false,
+        "version": "0.1.0.1"
       }
     }
   }

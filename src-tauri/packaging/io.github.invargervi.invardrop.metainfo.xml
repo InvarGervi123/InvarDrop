@@ -13,5 +13,8 @@
   <launchable type="desktop-id">InvarDrop.desktop</launchable>
   <provides><binary>invardrop</binary></provides>
   <url type="homepage">https://github.com/InvarGervi123/InvarDrop</url>
+  <releases>
+    <release version="0.1.0-beta.1" date="2026-11-15" type="development"/>
+  </releases>
   <content_rating type="oars-1.1"/>
 </component>

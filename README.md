@@ -6,17 +6,20 @@ discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 3.1 (feature branch)
+## Beta release — v0.1.0-beta.1
 
-Milestone 3.0 is merged into `main` through PR #14. Milestone 3.1 adds independent
-process integration tests for pairing, authenticated transfers, crash recovery,
-cancellation, trust revocation, and explicit optional processing. See
-[cross-device testing coverage and limitations](docs/cross-device-testing.md).
-Native CI and same-host simulations do not establish physical Linux-to-Windows
-compatibility. AppImage, Debian, NSIS and MSI testing packages are described in
-[packaging, prerequisites and limitations](docs/packaging.md). No release is published.
-The compact UI, system themes and explicit confirmations are described in
-[UI/UX changes and validation](docs/ui-ux-polish.md).
+**Use it. It works. Forget it.** Fast, minimal LAN sharing without accounts,
+cloud services, telemetry, or unnecessary background services.
+
+Download the [first public Beta](https://github.com/InvarGervi123/InvarDrop/releases/tag/v0.1.0-beta.1).
+See [installation, checksum verification and known limitations](docs/beta-release.md).
+Linux x86_64: AppImage / Debian; Windows x86_64: NSIS / MSI. This is a testing
+prerelease, not a production-readiness or full cross-platform compatibility claim.
+The installers are unsigned; do not bypass platform security warnings.
+
+Milestone 3.1 is merged through PR #15. See
+[cross-device testing coverage](docs/cross-device-testing.md),
+[packaging details](docs/packaging.md), and [UI/UX validation](docs/ui-ux-polish.md).
 
 Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
 appear and disappear in the React UI without refresh. Each run advertises a
@@ -195,8 +198,8 @@ in `src-tauri/Cargo.lock`. Native build, lint and test commands use `--locked`
 so dependency resolution cannot silently change. Both lockfiles belong in Git.
 
 Public source: [InvarGervi123/InvarDrop](https://github.com/InvarGervi123/InvarDrop).
-No release publication is configured. A later, separately approved release
-workflow may sign and publish approved installers.
+The first Beta is published manually from an exact verified commit. CI uploads
+testing artifacts; it does not publish releases or automatically update applications.
 
 ## Local validation — milestone 2.1, 2026-11-12
 
