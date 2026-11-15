@@ -6,11 +6,15 @@ discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 3.0 (feature branch)
+## Current status — milestone 3.1 (feature branch)
 
-Milestone 2.9 is merged into `main` through PR #13. Milestone 3.0 adds AppImage,
-Debian, NSIS and MSI test installers with package inspection and workflow artifacts.
-See [packaging, prerequisites and limitations](docs/packaging.md). No release is published.
+Milestone 3.0 is merged into `main` through PR #14. Milestone 3.1 adds independent
+process integration tests for pairing, authenticated transfers, crash recovery,
+cancellation, trust revocation, and explicit optional processing. See
+[cross-device testing coverage and limitations](docs/cross-device-testing.md).
+Native CI and same-host simulations do not establish physical Linux-to-Windows
+compatibility. AppImage, Debian, NSIS and MSI testing packages are described in
+[packaging, prerequisites and limitations](docs/packaging.md). No release is published.
 The compact UI, system themes and explicit confirmations are described in
 [UI/UX changes and validation](docs/ui-ux-polish.md).
 

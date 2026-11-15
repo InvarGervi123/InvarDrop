@@ -1200,8 +1200,13 @@ impl Receiver {
         sync_dir(path.parent().ok_or(Error::FileIo)?)?;
         self.record.position = position;
         self.record.updated = now()?;
-        let _guard = lock(&self.catalog.mutex);
-        self.catalog.save(&self.record)
+        {
+            let _guard = lock(&self.catalog.mutex);
+            self.catalog.save(&self.record)?;
+        }
+        #[cfg(test)]
+        super::service::cross_device_tests::checkpoint_barrier();
+        Ok(())
     }
     pub fn file_end(&mut self, index: u32, hash: &str) -> Result<()> {
         self.open()?;

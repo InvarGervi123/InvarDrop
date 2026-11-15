@@ -35,7 +35,7 @@ pub(super) fn after_trust_read() {
 async fn start(root: &Path, duration: Duration) -> Service {
     start_with_master(root, duration, &random::<32>().unwrap()).await
 }
-async fn start_with_master(root: &Path, duration: Duration, master: &[u8]) -> Service {
+pub(super) async fn start_with_master(root: &Path, duration: Duration, master: &[u8]) -> Service {
     start_observed(root, duration, master, Arc::new(|_| {})).await
 }
 async fn start_observed(root: &Path, duration: Duration, master: &[u8], notify: Notify) -> Service {
