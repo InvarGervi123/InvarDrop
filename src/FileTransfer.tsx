@@ -1,4 +1,6 @@
 import { useRef, useState } from "react";
+import { ErrorNotice } from "./ErrorNotice";
+import { Icon } from "./Icon";
 import type { SecureConnection, FileTransfer as Transfer } from "./useSecurity";
 
 const byteFormatter = new Intl.NumberFormat("en", { maximumFractionDigits: 1 });
@@ -7,8 +9,15 @@ type Operate = (command: string, args: Record<string, unknown>) => Promise<boole
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "Unknown size";
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  const index = bytes ? Math.min(4, Math.floor(Math.log(bytes) / Math.log(1024))) : 0;
+  const index = bytes ? Math.max(0, Math.min(4, Math.floor(Math.log(bytes) / Math.log(1024)))) : 0;
   return `${byteFormatter.format(bytes / 1024 ** index)} ${units[index]}`;
+}
+export function formatEta(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  const value = Math.ceil(seconds);
+  if (value < 60) return `${value} s`;
+  if (value < 3600) return `${Math.floor(value / 60)} min ${value % 60} s`;
+  return `${Math.floor(value / 3600)} h ${Math.floor(value % 3600 / 60)} min`;
 }
 export function progressPercent(transfer: Transfer): number {
   if (transfer.size === 0) return transfer.status === "complete" ? 100 : 0;
@@ -24,13 +33,16 @@ const labels: Record<string, string> = {
 
 export function FileTransfer({ connection, operate }: { connection: SecureConnection; operate: Operate }) {
   const busy = useRef(false);
-  const [extractConfirmed,setExtractConfirmed]=useState<string|null>(null);
-  const [extracted,setExtracted]=useState<string|null>(null);
+  const [extractConfirmed, setExtractConfirmed] = useState<string | null>(null);
+  const [extracted, setExtracted] = useState<string | null>(null);
+  const extractionRequests = useRef(new Set<string>());
   const [pending, setPending] = useState(false);
   const [confirmedId, setConfirmedId] = useState<string | null>(null);
   const [respondedId, setRespondedId] = useState<string | null>(null);
   const [cancelId, setCancelId] = useState<string | null>(null);
   const transfer = connection.transfer;
+  const measuring = transfer && ["sending", "receiving"].includes(transfer.status);
+  const extractionKey = `${connection.id}:${transfer?.id}`;
   const incoming = transfer?.direction === "incoming";
   const waiting = transfer?.status === "awaiting_approval";
   const active = transfer && !["complete", "rejected", "expired", "cancelled", "error"].includes(transfer.status);
@@ -56,6 +68,17 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
     catch { setCancelId(null); }
     finally { busy.current = false; setPending(false); }
   };
+  const extract = async () => {
+    if (!transfer || transfer.status !== "complete" || !incoming || transfer.isFolder || !transfer.name.toLowerCase().endsWith(".zip") || extractConfirmed !== extractionKey || extractionRequests.current.has(extractionKey)) return;
+    extractionRequests.current.add(extractionKey); setExtracted(extractionKey);
+    try {
+      if (!await operate("processing_extract", { connectionId: connection.id, transferId: transfer.id })) {
+        extractionRequests.current.delete(extractionKey); setExtracted(current => current === extractionKey ? null : current);
+      }
+    } catch {
+      extractionRequests.current.delete(extractionKey); setExtracted(current => current === extractionKey ? null : current);
+    }
+  };
   const statusText = waiting ? transfer?.resuming
     ? incoming ? "Waiting for your approval to resume" : "Waiting for receiver approval to resume…"
     : incoming ? "Waiting for your decision" : "Waiting for the receiver…"
@@ -63,19 +86,21 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
     : labels[transfer?.status ?? ""] ?? "Processing file…";
   const status = transfer?.isFolder ? statusText.replace(/file/g, "folder") : statusText;
   return <div className="file-transfer">
-    {connection.phase === "connected" && !active && <button type="button" disabled={pending || Boolean(active)} onClick={() => void run()}>Choose {connection.supportsBundles ? "files" : "a file"} to send</button>}
-    {connection.phase === "connected" && connection.supportsBundles && !active && <button type="button" className="secondary" disabled={pending} onClick={() => void run(undefined, true)}>Choose a folder to send</button>}
-    {transfer && <section className="file-request" aria-label={incoming ? "Incoming file request" : "Outgoing file"}>
+    <div className="send-actions">
+    {connection.phase === "connected" && !active && <button type="button" disabled={pending || Boolean(active)} onClick={() => void run()}><Icon name="send" />Choose {connection.supportsBundles ? "files" : "a file"} to send</button>}
+    {connection.phase === "connected" && connection.supportsBundles && !active && <button type="button" className="secondary" disabled={pending} onClick={() => void run(undefined, true)}><Icon name="folder" />Choose a folder to send</button>}
+    </div>
+    {transfer && <section className="file-request" aria-label={incoming ? transfer.isFolder ? "Incoming folder request" : "Incoming file request" : "Outgoing file"}>
       {incoming && <p className="sender-name">From <strong dir="auto">{transfer.senderName ?? "Paired device"}</strong><small>Device-reported name · verified key shown above</small></p>}
       <p className="file-name" dir="auto">{transfer.name}</p>
-      <p className="file-size" title={`${transfer.size.toLocaleString()} bytes`}>{formatBytes(transfer.size)}{transfer.isFolder && <> · {transfer.fileCount} files · folder</>} · {incoming ? "Incoming" : "Outgoing"}</p>
+      <p className="file-size" title={`${transfer.size.toLocaleString("en")} bytes`}>{formatBytes(transfer.size)}{transfer.isFolder && <> · {transfer.fileCount} files · folder</>} · {incoming ? "Incoming" : "Outgoing"}</p>
       <p className={`request-status request-${transfer.status}`} role="status">{status}</p>
       <div className="transfer-metrics" aria-label="Transfer statistics">
-        <progress aria-label="File data progress" max={100} value={progressPercent(transfer)} />
+        <progress aria-label="File data progress" aria-valuetext={`${progressPercent(transfer)}% · ${formatBytes(transfer.transferred)} of ${formatBytes(transfer.size)}`} max={100} value={progressPercent(transfer)} />
         <p>{progressPercent(transfer)}% · {formatBytes(transfer.transferred)} / {formatBytes(transfer.size)}</p>
         {transfer.resuming && <p>Resuming verified data · {formatBytes(Math.max(0, transfer.size - transfer.transferred))} remaining</p>}
-        <p>{transfer.bytesPerSecond === null ? "Speed —" : `${(transfer.bytesPerSecond / 1024 ** 2).toFixed(2)} MiB/s`}
-          {transfer.etaSeconds !== null && <> · ETA ~{transfer.etaSeconds} s</>}</p>
+        <p>{!measuring || transfer.bytesPerSecond === null ? "Speed —" : `${(transfer.bytesPerSecond / 1024 ** 2).toFixed(2)} MiB/s`}
+          {measuring && transfer.etaSeconds !== null && <> · ETA ~{formatEta(transfer.etaSeconds)}</>}</p>
       </div>
       {connection.phase === "connected" && active && !(incoming && waiting) && transfer.status !== "committing" && <button type="button" className="secondary" disabled={pending || cancelId === transfer.id || transfer.status === "cancelling"} onClick={() => void cancelTransfer()}>Cancel transfer</button>}
       {connection.supportsResume && active && <p className="file-hint">Cancel stops this operation and removes incomplete received data. Discard removes a saved recovery record.</p>}
@@ -89,9 +114,15 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
         <p className="file-hint">{answered ? "Decision sent…" : transfer.resuming ? "Saved data stays isolated. Resume starts only after you accept; declining keeps the recovery data. The request expires after 90 seconds." : "Nothing is saved until you accept. The request expires after 90 seconds."}</p>
       </>}
       {incoming && ["rejected", "expired"].includes(transfer.status) && <p className="file-hint">{transfer.resuming ? "Resume did not start. Saved recovery data is kept." : "No file was saved."}</p>}
-      {incoming && transfer.status==="complete" && !transfer.isFolder && transfer.name.toLowerCase().endsWith(".zip") && <div><p>Keep the ZIP unchanged, or optionally extract it into a separate folder.</p><label><input type="checkbox" checked={extractConfirmed===transfer.id} onChange={e=>setExtractConfirmed(e.target.checked?transfer.id:null)}/>I want to extract this ZIP</label><button disabled={extractConfirmed!==transfer.id||extracted===transfer.id} onClick={()=>{setExtracted(transfer.id);void operate("processing_extract",{connectionId:connection.id,transferId:transfer.id}).then(ok=>{if(!ok)setExtracted(null);});}}>Extract ZIP</button></div>}
+      {incoming && transfer.status === "complete" && !transfer.isFolder && transfer.name.toLowerCase().endsWith(".zip") && <div className="zip-extraction">
+        <h3>ZIP extraction (optional)</h3>
+        <p className="file-hint">The verified ZIP stays saved. Extract a separate copy only if you want to; extracted content is never opened or run.</p>
+        <label className="comparison-check"><input type="checkbox" checked={extractConfirmed === extractionKey} disabled={extracted === extractionKey} onChange={event => setExtractConfirmed(event.target.checked ? extractionKey : null)} />I want to extract this ZIP</label>
+        <button type="button" disabled={extractConfirmed !== extractionKey || extracted === extractionKey} onClick={() => void extract()}>{extracted === extractionKey ? "Extraction requested" : "Extract ZIP"}</button>
+        {extracted === extractionKey && <p className="file-hint">Check File preparation &amp; extraction below for the result. Your original ZIP is kept.</p>}
+      </div>}
       {transfer.path && <p className="saved-path">Saved to: <span dir="auto">{transfer.path}</span></p>}
-      {transfer.error && transfer.status !== "expired" && <p className="error-text" role="alert">{transfer.error}</p>}
+      {transfer.error && transfer.status !== "expired" && <ErrorNotice message={transfer.error} />}
     </section>}
   </div>;
 }

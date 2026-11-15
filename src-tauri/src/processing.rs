@@ -92,6 +92,10 @@ impl Processing {
     pub fn views(&self) -> Vec<View> {
         lock(&self.jobs).iter().map(|j| j.view.clone()).collect()
     }
+    pub fn converter_configured(&self) -> bool {
+        // Report selection only; do not expose a local path or claim codec support.
+        lock(&self.ffmpeg).is_some()
+    }
     pub fn configure(&self, path: PathBuf) -> Result<(), String> {
         if !path.is_absolute()
             || !bundle::regular_metadata(&path)
@@ -803,6 +807,23 @@ fn sync_directories(root: &Path, cancel: &CommitGate) -> Result<(), String> {
 mod tests {
     use super::*;
     use zip::write::SimpleFileOptions;
+    #[test]
+    fn converter_selection_is_explicit_and_does_not_persist_across_sessions() {
+        let processing = Processing::default();
+        assert!(!processing.converter_configured());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ffmpeg.exe");
+        fs::write(&path, b"test selection, not an executable").unwrap();
+        processing.configure(path).unwrap();
+        assert!(processing.converter_configured());
+        assert!(
+            processing
+                .configure(directory.path().join("missing"))
+                .is_err()
+        );
+        assert!(processing.converter_configured());
+        assert!(!Processing::default().converter_configured());
+    }
     fn archive(path: &Path, entries: &[(&str, &[u8])]) {
         let mut z = zip::ZipWriter::new(fs::File::create(path).unwrap());
         for (name, data) in entries {

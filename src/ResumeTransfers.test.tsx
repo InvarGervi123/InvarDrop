@@ -94,3 +94,16 @@ it("does not automatically remove a completed zero-byte journal when a trusted p
   expect(screen.getByText("0 B verified · 0 B remaining · 100%")).toBeTruthy();const connected=snapshot();connected.resumable=state.resumable;view.rerender(<ResumeTransfers snapshot={connected} operate={operate}/>);
   expect(screen.getByText("Completed · awaiting acknowledgement")).toBeTruthy();expect(screen.queryByText("Resume")).toBeNull();expect(operate).not.toHaveBeenCalled();
 });
+
+it("focuses Keep when confirming Discard and restores the trigger when cancelled", () => {
+  const operate = vi.fn(); render(<ResumeTransfers snapshot={snapshot()} operate={operate} />);
+  const trigger = screen.getByRole("button", { name: "Discard" }); fireEvent.click(trigger);
+  expect(screen.getByRole("group", { name: "Confirm discard for Holiday" })).toBeTruthy();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Keep" }));
+  fireEvent.click(screen.getByRole("button", { name: "Keep" }));
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Discard" })); expect(operate).not.toHaveBeenCalled();
+});
+it("gives assistive technology the verified and remaining byte counts", () => {
+  render(<ResumeTransfers snapshot={snapshot()} operate={vi.fn()} />);
+  expect(screen.getByRole("progressbar").getAttribute("aria-valuetext")).toBe("37.5% · 1.5 KiB verified · 2.5 KiB remaining");
+});

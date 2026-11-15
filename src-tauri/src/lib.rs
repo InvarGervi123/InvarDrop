@@ -194,6 +194,10 @@ fn processing_snapshot(
     processing.views()
 }
 #[tauri::command]
+fn processing_converter_status(processing: tauri::State<'_, processing::Processing>) -> bool {
+    processing.converter_configured()
+}
+#[tauri::command]
 async fn processing_converter(
     processing: tauri::State<'_, processing::Processing>,
 ) -> Result<(), String> {
@@ -314,6 +318,7 @@ pub fn run() {
             file_choose,
             processing_dismiss,
             processing_snapshot,
+            processing_converter_status,
             processing_converter,
             processing_decide,
             processing_cancel,

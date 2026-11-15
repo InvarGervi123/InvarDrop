@@ -6,7 +6,12 @@ discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 2.8 (feature branch)
+## Current status — milestone 2.9 (feature branch)
+
+Milestone 2.8 is merged into `main` through PR #12. Milestone 2.9 refines the
+compact interface, system themes, keyboard focus, error guidance, explicit
+processing choices, and trust/recovery confirmations without changing the secure
+transfer protocol. See [UI/UX changes and validation](docs/ui-ux-polish.md).
 
 Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
 appear and disappear in the React UI without refresh. Each run advertises a

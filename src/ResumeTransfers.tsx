@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatBytes } from "./FileTransfer";
 import type { FileTransfer, ResumeView, SecuritySnapshot } from "./useSecurity";
 
@@ -12,6 +12,9 @@ function ResumeRow({ job, snapshot, operate }: { job: ResumeView; snapshot: Secu
   const [submitted, setSubmitted] = useState<string | null>(null);
   const [discarding, setDiscarding] = useState<string | null>(null);
   const [discarded, setDiscarded] = useState(false);
+  const keepButton = useRef<HTMLButtonElement>(null);
+  const discardButton = useRef<HTMLButtonElement>(null);
+  const wasDiscardOpen = useRef(false);
   const peers = snapshot.connections.filter(connection => connection.peer === job.peer && connection.phase === "connected");
   const connection = peers.find(connection => connection.supportsResume && !active(connection.transfer) && connection.transfer?.id !== job.id);
   const retryNeedsReconnect = !connection && peers.some(connection => connection.transfer?.id === job.id);
@@ -23,6 +26,11 @@ function ResumeRow({ job, snapshot, operate }: { job: ResumeView; snapshot: Secu
   const percentage = job.completed ? 100 : job.size > 0 ? Math.floor(verified / job.size * 1000) / 10 : 0;
   const answered = submitted === decision;
   const discardOpen = discarding === decision;
+  useEffect(() => {
+    if (discardOpen) keepButton.current?.focus();
+    else if (wasDiscardOpen.current) discardButton.current?.focus();
+    wasDiscardOpen.current = discardOpen;
+  }, [discardOpen]);
   const resume = async () => {
     if (busy.current || !connection || jobActive || confirmed !== decision || answered || discardOpen || discarded || job.completed) return;
     busy.current = true; setPending(true);
@@ -58,22 +66,22 @@ function ResumeRow({ job, snapshot, operate }: { job: ResumeView; snapshot: Secu
     <p className="file-size">{job.direction === "incoming" ? "Receiving" : "Sending"}{job.isFolder ? ` · ${job.fileCount} files · folder` : " · file"} · {formatBytes(job.size)}</p>
     <p className="peer-key">Paired key <span dir="ltr">{job.peer.slice(0, 16)}</span></p>
     <div className="transfer-metrics">
-      <progress aria-label="Previously verified data" max={100} value={percentage} />
+      <progress aria-label="Previously verified data" aria-valuetext={`${percentage}% · ${formatBytes(verified)} verified · ${formatBytes(remaining)} remaining`} max={100} value={percentage} />
       <p>{formatBytes(verified)} verified · {formatBytes(remaining)} remaining · {percentage}%</p>
       <p>Speed — · {job.completed ? "completed" : "waiting to resume"}</p>
     </div>
     <p className="request-status" role="status">{status}</p>
-    {discardOpen ? <>
+    {discardOpen ? <div role="group" aria-label={`Confirm discard for ${job.name}`}>
       <p className="file-hint">{job.completed ? "Remove only the saved acknowledgement record? Your completed files stay saved." : "Discard saved recovery data for this transfer? You will need to send it again from the beginning."}</p>
       <div className="request-actions">
-        <button type="button" className="secondary" disabled={pending} onClick={() => setDiscarding(null)}>Keep</button>
-        <button type="button" disabled={pending || jobActive || discarded} onClick={() => void discard()}>{job.completed ? "Discard acknowledgement" : "Discard saved data"}</button>
+        <button ref={keepButton} type="button" className="secondary" disabled={pending} onClick={() => setDiscarding(null)}>Keep</button>
+        <button type="button" className="danger" disabled={pending || jobActive || discarded} onClick={() => void discard()}>{job.completed ? "Discard acknowledgement" : "Discard saved data"}</button>
       </div>
-    </> : <>
+    </div> : <>
       {!job.completed && <label className="comparison-check"><input type="checkbox" checked={confirmed === decision} disabled={pending || !connection || Boolean(jobActive) || answered || discarded} onChange={event => setConfirmed(event.target.checked ? decision : null)} />I want to resume this transfer</label>}
       <div className="request-actions">
         {!job.completed && <button type="button" disabled={pending || !connection || Boolean(jobActive) || confirmed !== decision || answered || discarded} onClick={() => void resume()}>Resume</button>}
-        <button type="button" className="secondary" disabled={pending || Boolean(jobActive) || discarded} onClick={() => { setDiscarding(decision); setConfirmed(null); }}>Discard</button>
+        <button ref={discardButton} type="button" className="secondary" disabled={pending || Boolean(jobActive) || discarded} onClick={() => { setDiscarding(decision); setConfirmed(null); }}>Discard</button>
       </div>
     </>}
   </li>;
