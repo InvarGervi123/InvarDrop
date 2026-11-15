@@ -328,3 +328,29 @@ async fn optional_conversion_decision_and_prepared_references_preserve_resume_so
     a.stop().await;
     b.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_active_folder_keeps_prepared_sources_without_resume_ticket() {
+    let d = tempfile::tempdir().unwrap();
+    let da = d.path().join("a");
+    let db = d.path().join("b");
+    let a = start(&da, Duration::from_secs(10)).await;
+    let b = start(&db, Duration::from_secs(10)).await;
+    let (ac, bc) = pair(&a, &b).await;
+    let batch = da.join("prepared/audio-legacy");
+    let folder = batch.join("Album");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("file"), b"prepared").unwrap();
+    a.send_bundle(&ac.id, BundleSource::folder(&folder).await.unwrap())
+        .unwrap();
+    let offer = file_status(&b, &bc.id, "awaiting_approval").await;
+    assert!(a.snapshot().resumable.is_empty());
+    a.cleanup_prepared().await.unwrap();
+    assert!(folder.join("file").exists());
+    a.cancel_file(&ac.id, &offer.id).unwrap();
+    closed(&a, &ac.id).await;
+    a.cleanup_prepared().await.unwrap();
+    assert!(!batch.exists());
+    a.stop().await;
+    b.stop().await;
+}

@@ -362,6 +362,17 @@ impl Service {
         })
     }
     pub(crate) async fn cleanup_prepared(&self) -> std::result::Result<(), String> {
+        // Legacy streams have no durable source ticket; keep their lazy-open files alive.
+        if self
+            .snapshot()
+            .connections
+            .iter()
+            .filter_map(|c| c.transfer.as_ref())
+            .any(|t| t.direction == "outgoing" && t.active())
+        {
+            return Ok(());
+        }
+
         let catalog = get_catalog(&self.shared).map_err(|e| e.to_string())?;
         let root = self
             .shared
