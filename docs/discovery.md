@@ -1,88 +1,90 @@
-# Milestone 2.1: обнаружение в локальной сети
+# Milestone 2.1: Local Network Discovery
 
-## Протокол и границы доверия
+## Protocol and trust boundaries
 
-mDNS — multicast DNS на UDP 5353; DNS-SD описывает сервис записями PTR/SRV/TXT
-и адресами A/AAAA. Приложения спрашивают локальную сеть об `_invardrop._tcp.local.`
-и публикуют собственную запись. Внешний DNS, аккаунты и сервер не нужны.
+mDNS is multicast DNS over UDP 5353; DNS-SD describes services using PTR/SRV/TXT
+records and A/AAAA addresses. Applications query the local network for
+`_invardrop._tcp.local.` and publish their own records. No external DNS, accounts,
+or server are required.
 
-Используется [mdns-sd 0.21.7](https://github.com/keepsimple1/mdns-sd), Apache-2.0/MIT.
-Библиотека поддерживает Linux и Windows без установки Avahi/Bonjour, отслеживает
-сетевые интерфейсы, имеет daemon monitor и graceful shutdown. Отключены её
-неиспользуемые async/logging features. Один worker приложения и один поток
-библиотеки; дополнительный async-runtime не добавлен.
+The implementation uses [mdns-sd 0.21.7](https://github.com/keepsimple1/mdns-sd),
+licensed under Apache-2.0/MIT. The library supports Linux and Windows without
+Avahi/Bonjour, tracks network interfaces, provides a daemon monitor, and supports
+graceful shutdown. Its unused async/logging features are disabled. The application
+uses one worker and one library thread; no additional async runtime was added.
 
-Объявление содержит только:
+The advertisement contains only:
 
-| Поле | Значение |
+| Field | Value |
 |---|---|
-| Service instance | случайный UUID v4 текущего запуска |
-| Hostname | `invardrop-<uuid>.local.` — не системный hostname |
-| SRV port | `0`: в этом этапе endpoint передачи отсутствует |
-| TXT `id` | UUID запуска |
-| TXT `name` | `InvarDrop <первые 8 символов UUID>` |
-| TXT `v` | версия discovery-протокола `1` |
+| Service instance | Random UUID v4 for the current run |
+| Hostname | `invardrop-<uuid>.local.`, rather than the system hostname |
+| SRV port | `0`: this milestone has no transfer endpoint |
+| TXT `id` | Run UUID |
+| TXT `name` | `InvarDrop <first 8 characters of UUID>` |
+| TXT `v` | Discovery protocol version `1` |
 | TXT `mode` | `discovery` |
-| TXT `beat` | счётчик обновлений текущего запуска |
+| TXT `beat` | Update counter for the current run |
 
-Местные IP-адреса публикуются как необходимая часть mDNS. Имя ОС, username,
-MAC, каталоги, файлы и постоянный машинный ID не объявляются. ID и имя меняются
-после перезапуска. Это осознанный компромисс приватности: постоянная доверенная
-идентичность появится только вместе с authenticated pairing.
+Local IP addresses are published as a necessary part of mDNS. The OS name,
+username, MAC address, directories, files, and persistent machine ID are not
+advertised. The ID and name change after a restart. This is a deliberate privacy
+tradeoff: a persistent trusted identity will only be introduced with authenticated
+pairing.
 
-**mDNS не аутентифицирован.** Любой участник LAN может подделать имя и UUID.
-Список UI показывает `Not paired`; discovery нельзя использовать как разрешение
-передачи. SRV port 0 не следует интерпретировать как готовый transfer endpoint.
-Файлы и каталоги приложение пока не читает и не передаёт. В будущем транспорт
-потребует отдельного endpoint, проверки протокола, подтверждения и TLS/pairing.
+**mDNS is unauthenticated.** Any LAN participant can spoof a name or UUID. The UI
+list displays `Not paired`; discovery must never authorize a transfer. SRV port 0
+must not be interpreted as a ready transfer endpoint. This milestone does not read
+or transfer files or directories. A future transport requires a separate endpoint,
+protocol validation, confirmation, and TLS/pairing.
 
-## Жизненный цикл
+## Lifecycle
 
-1. Worker создаёт daemon, monitor, объявление и browse-подписку. Статус поиска
-   подтверждается успешным исходящим объявлением. Если за 10 секунд первого
-   объявления нет (или за 30 секунд после последнего), сессия перезапускается.
-   Это обнаруживает и случай, когда библиотека молча не создала multicast-сокеты.
-2. Каждые 20 секунд меняет TXT heartbeat. Повторная регистрация обновляет запись.
-3. Парсер проверяет тип сервиса, версию, режим, UUID, heartbeat и имя (до 80 UTF-8
-   байт, без управляющих и bidi-control символов).
-4. Tracker хранит DNS-источники отдельно и сводит их к одному устройству на UUID.
-   Собственный UUID исключается, но другой процесс на том же IP допустим.
-5. Goodbye/`ServiceRemoved` удаляет источник. Без нового heartbeat источник
-   истекает через 75 секунд по монотонным часам, независимо от длинного DNS TTL.
-   Повторный кешированный ответ с прежним heartbeat срок не продлевает и не
-   оживляет уже истёкшую/goodbye-запись. Последний маркер такого источника
-   сохраняется в том же ограниченном кеше; неактивные записи вытесняются первыми
-   при необходимости принять новые устройства. Это не защита от подделки mDNS.
-6. Ошибка daemon/закрытие канала очищает список и переводит UI в unavailable;
-   через 5 секунд worker пытается создать сессию заново с тем же session ID.
-   Изменения IP библиотека проверяет каждые 2 секунды.
-7. При штатном выходе worker снимает browse, unregister отправляет goodbye,
-   затем shutdown ждёт подтверждения daemon. Worker присоединяется к приложению.
-   Ожидания daemon ограничены; при аварийном завершении goodbye невозможен,
-   поэтому соседи используют срок истечения.
+1. The worker creates a daemon, monitor, advertisement, and browse subscription.
+   A successful outgoing advertisement confirms discovery availability. If no first
+   advertisement appears within 10 seconds, or 30 seconds elapse after the latest
+   advertisement, the session restarts. This also detects silent failures to create
+   multicast sockets in the library.
+2. Every 20 seconds, it changes the TXT heartbeat. Re-registration updates the record.
+3. The parser validates the service type, version, mode, UUID, heartbeat, and name
+   (at most 80 UTF-8 bytes, without control or bidi-control characters).
+4. The tracker stores DNS sources separately and combines them into one device per
+   UUID. It excludes its own UUID but permits another process on the same IP.
+5. Goodbye/`ServiceRemoved` removes a source. Without a new heartbeat, a source
+   expires after 75 seconds on a monotonic clock, regardless of a long DNS TTL.
+   Repeated cached responses with the same heartbeat neither extend the deadline
+   nor revive an expired/goodbye record. The latest marker for that source remains
+   in the same bounded cache; inactive records are evicted first when space is
+   needed for new devices. This does not protect against mDNS spoofing.
+6. A daemon error or channel closure clears the list and marks the UI unavailable.
+   After 5 seconds, the worker attempts to create a new session with the same
+   session ID. The library checks IP changes every 2 seconds.
+7. On normal exit, the worker stops browsing, unregister sends goodbye, and shutdown
+   waits for daemon acknowledgement. The application joins the worker. Daemon
+   waits are bounded; a crash cannot send goodbye, so peers use expiration.
 
-Обновление heartbeat — дополнительный небольшой multicast-трафик. Интервал
-75 секунд допускает потерю нескольких обновлений и даёт предсказуемое удаление
-аварийно выключенного соседа. Это не проверка доступности будущего TLS-сервера.
+Heartbeat updates add a small amount of multicast traffic. The 75-second interval
+allows several missed updates while providing predictable removal of a crashed
+peer. It does not check the availability of a future TLS server.
 
-Ограничение tracker — 512 DNS-источников; за один проход worker обрабатывает
-не более 128 событий каждого канала. Лимит ограничивает состояние приложения,
-но не является защитой всего сетевого стека от hostile LAN/packet flood.
+The tracker is limited to 512 DNS sources; each worker iteration processes at most
+128 events per channel. This bounds application state but does not protect the
+entire network stack against a hostile LAN or packet flood.
 
-## Rust → React
+## Rust to React
 
-`discovery_snapshot` возвращает текущее состояние, а `discovery-updated`
-доставляет изменения только в локальное окно `main`. Снимок содержит ревизию,
-имя/ID этого запуска, состояние службы и список имён/ID соседей. IP и heartbeat
-в UI не передаются. Ревизия изменяется только при видимом изменении.
+`discovery_snapshot` returns the current state, and `discovery-updated` delivers
+changes only to the local `main` window. A snapshot contains a revision, the name/ID
+of this run, service status, and peer names/IDs. IP addresses and heartbeats are not
+sent to the UI. The revision changes only when visible state changes.
 
-React сначала регистрирует listener, затем читает начальный снимок. Принимает
-только более новую ревизию: поздний ответ команды не перезапишет новое событие.
-Listener удаляется при размонтировании, включая гонку async-подписки в StrictMode.
-UI не опрашивает сеть, не требует refresh и не получает разрешений filesystem,
-shell или отправки произвольных Tauri events. Рендеринг имён — обычный React text.
+React registers its listener before reading the initial snapshot. It accepts only
+newer revisions, so a late command response cannot overwrite a newer event. The
+listener is removed on unmount, including the async subscription race in StrictMode.
+The UI does not poll the network or require refresh, filesystem, shell, or arbitrary
+Tauri event permissions. Names are rendered as ordinary React text.
 
-## Проверки
+## Validation
 
 ```sh
 npm ci
@@ -94,51 +96,51 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 npm run tauri build -- --no-bundle -- --locked
 ```
 
-Unit-тесты не требуют multicast: проверяют tracking, dedup, удаление алиасов,
-self-filtering, истечение срока/heartbeat, лимит записей, валидацию входных данных
-и ревизии снимков. CI запускается на Linux и Windows, включая `feature/**`.
+Unit tests do not require multicast. They cover tracking, deduplication, alias
+removal, self-filtering, expiration/heartbeats, record limits, input validation, and
+snapshot revisions. CI runs on Linux and Windows, including `feature/**` branches.
 
-Для настоящего сетевого теста можно открыть два экземпляра приложения или
-диагностические процессы (это реальные mDNS-объявления, не симулятор):
+For an actual network test, start two application instances or diagnostic processes
+(these publish real mDNS advertisements, rather than simulate discovery):
 
 ```sh
 cargo run --locked --manifest-path src-tauri/Cargo.toml --example discovery_probe -- 90
 ```
 
-Число — продолжительность в секундах. Два процесса на одном компьютере проверяют
-реальный multicast и разные идентификаторы, но **не подтверждают связь между
-двумя физическими устройствами**. Для этого нужны два устройства в одной LAN.
+The number is the duration in seconds. Two processes on one computer verify real
+multicast and distinct identities, but **do not verify communication between two
+physical devices**. That requires two devices on the same LAN.
 
-Ручной сценарий: запустить A, проверить пустой список; запустить B, проверить
-взаимное появление без refresh; оставить оба более 75 секунд; штатно закрыть B и
-проверить исчезновение; запустить B заново, аварийно завершить и проверить
-исчезновение за не более чем примерно 75 секунд от последнего heartbeat.
+Manual scenario: start A and check that its list is empty; start B and check that
+both appear without refresh; leave both running for more than 75 seconds; close B
+normally and check its removal; restart B, terminate it abruptly, and check removal
+within approximately 75 seconds of its last heartbeat.
 
-## Сетевая среда
+## Network environment
 
-Wi-Fi client isolation, VLAN, фильтрация multicast, VPN, firewall и несколько
-сетевых интерфейсов могут влиять на результат. Нужны разрешённые mDNS UDP 5353
-и multicast группы IPv4/IPv6 в доверенной LAN. Приложение не меняет firewall,
-не устанавливает сетевые службы и не выполняет сканирование адресов.
-На Windows runtime/multicast и firewall нужно проверить отдельно от CI-сборки.
+Wi-Fi client isolation, VLANs, multicast filtering, VPNs, firewalls, and multiple
+network interfaces can affect results. mDNS UDP 5353 and IPv4/IPv6 multicast groups
+must be allowed on the trusted LAN. The application does not change firewall rules,
+install network services, or scan addresses. Windows runtime/multicast and firewall
+behavior need verification separately from CI builds.
 
-## Фактически выполнено на CachyOS
+## Validation performed on CachyOS
 
-- 13 unit-тестов; Rustfmt, строгий Clippy и frontend production build.
-- Два независимых нативных процесса: взаимное появление и self-filtering,
-  сохранение живого соседа дольше 75 секунд, исчезновение после штатного закрытия.
-- Аварийное завершение второго процесса без goodbye: к контрольному снимку
-  через 94 секунды запись исчезла; граница истечения 75 секунд отдельно проверена
-  unit-тестом с монотонными часами.
-- Нативный UI проверен при 360 × 420, включая реальное имя найденного соседа.
-- После добавления watchdog заново собрана production-версия и подтверждено
-  взаимное обнаружение с независимым диагностическим процессом.
-- Отказ `socket()` принудительно вызван через seccomp только у дочернего
-  диагностического процесса: unavailable на 10-й секунде, автоматический retry
-  на 15-й, повторный unavailable на 25-й, clean stop/exit 0 на 27-й. Настройки
-  firewall/сети ОС не менялись; libseccomp использована только внешним тестом,
-  не является зависимостью приложения.
+- 13 unit tests; Rustfmt, strict Clippy, and a frontend production build.
+- Two independent native processes: mutual discovery and self-filtering,
+  retention of a live peer beyond 75 seconds, and removal after normal exit.
+- Abrupt termination of the second process without goodbye: the record was absent
+  at the 94-second checkpoint. A unit test with a monotonic clock separately
+  verifies the 75-second expiration boundary.
+- Native UI checked at 360 × 420, including the actual discovered peer name.
+- After adding the watchdog, the production version was rebuilt and mutual
+  discovery was verified again with an independent diagnostic process.
+- `socket()` failure was injected with seccomp only into a child diagnostic
+  process: unavailable at 10 seconds, automatic retry at 15 seconds, unavailable
+  again at 25 seconds, and clean stop/exit 0 at 27 seconds. OS firewall/network
+  settings were unchanged. Only the external test used libseccomp; it is not an
+  application dependency.
 
-Отдельные физические устройства, Windows runtime/multicast, смена Wi-Fi/VPN,
-firewall-сценарии и длительные испытания packet loss пока не проверены.
-CI проверяет сборку/тесты, но не доказывает сетевую совместимость устройств.
+Separate physical devices, Windows runtime/multicast, Wi-Fi/VPN transitions,
+firewall scenarios, and prolonged packet loss have not yet been tested.
+CI verifies builds/tests but does not establish network compatibility between devices.

@@ -1,161 +1,165 @@
-# Milestone 2.6 — большие файлы и папки
+# Milestone 2.6 — Large Files and Folders
 
-Актуальное дополнение Milestone 2.7: [восстановление передач](resumable-transfers.md).
+Current Milestone 2.7 supplement: [resumable transfers](resumable-transfers.md).
 
+## Transfer and consent
 
-## Передача и согласие
+An operation transfers one regular file, several selected files, or an entire
+folder, including nested and empty directories and zero-byte files. Native dialogs
+run in Rust: the frontend supplies only a connection ID, never a source or
+destination path. A single selected file uses the existing single-file protocol
+flow; multiple files use the root name `InvarDrop files`.
 
-Операция передаёт одиночный обычный файл, несколько выбранных файлов или одну
-папку целиком, включая вложенные и пустые каталоги и файлы нулевой длины.
-Нативные диалоги работают в Rust: frontend передаёт только ID соединения, никогда
-путь источника или назначения. Один выбранный файл использует прежний файловый
-путь протокола; несколько файлов получают корень `InvarDrop files`.
+The receiver sees the folder name, the sender's self-reported device name, the file
+count (excluding directories), and the total size. Acceptance requires checking the
+confirmation for this specific operation and clicking Accept. Decline and the
+90-second timeout create no staging area and save no data. A new offer does not
+inherit prior consent. Pairing, pinning, trust revocation, TLS 1.3, and the OS keyring
+are preserved.
 
-Получатель видит имя папки, самозаявленное имя отправителя, количество файлов
-(каталоги в это число не входят) и общий размер. Для принятия необходимо отметить
-подтверждение именно этой операции и нажать Accept. Decline и истечение 90 секунд
-не создают staging и не сохраняют данные. Новое предложение не наследует согласие
-предыдущего. Pairing, pinning, отзыв доверия, TLS 1.3 и OS keyring сохранены.
+## Protocol and resource limits
 
-## Протокол и ограничение ресурсов
+The new ALPN is `invardrop/5`, with hello version 5. TLS negotiates the preferred
+version 5 or version 4 for Milestone 2.5 compatibility. Version 4 supports only
+single files up to 4 GiB; folders and larger files are rejected before an offer is
+sent. Earlier versions are unsupported. Identity/trust storage is unchanged.
 
-Новый ALPN `invardrop/5`, hello version 5. TLS согласует предпочтительную версию 5
-или версию 4 для совместимости с Milestone 2.5. На версии 4 доступны только
-одиночные файлы до 4 GiB; папки и большие файлы отклоняются до отправки предложения.
-Более ранние версии не поддерживаются. Identity/trust storage не меняется.
+The manifest contains a safe root name, a sorted list of relative paths with
+`file`/`directory` types and `u64` sizes, and a `u64` total size. Declared sizes are
+summed with overflow checks; directory sizes must be zero, and the sum must match
+the declared total. The receiver calculates the file count.
 
-Манифест содержит безопасное имя корня, отсортированный список относительных
-путей с типом `file`/`directory` и размером `u64`, общий размер `u64`.
-Объявленные размеры суммируются с проверкой переполнения; размер каталога всегда
-ноль, итог обязан совпадать с объявлением. Число файлов вычисляет получатель.
+Limits per operation:
 
-Лимиты на одну операцию:
-
-| Ресурс | Лимит |
+| Resource | Limit |
 | --- | --- |
-| Файл / сумма файлов | 1 TiB (2^40 байт) |
-| Записи, включая каталоги | 4096 |
-| Глубина относительного пути | 16 компонентов |
-| Компонент имени | 200 байт UTF-8 |
-| Относительный путь | 1024 байта UTF-8 |
-| JSON манифеста | 240 KiB |
-| JSON BundleOffer с обёрткой | 240 KiB + 512 байт |
-| Другие JSON frames | прежние 2048 байт |
-| Данные чанка | прежние 64 KiB |
+| Single file / total file size | 1 TiB (2^40 bytes) |
+| Entries, including directories | 4096 |
+| Relative path depth | 16 components |
+| Name component | 200 UTF-8 bytes |
+| Relative path | 1024 UTF-8 bytes |
+| Manifest JSON | 240 KiB |
+| BundleOffer JSON including its wrapper | 240 KiB + 512 bytes |
+| Other JSON frames | Existing 2048 bytes |
+| Chunk payload | Existing 64 KiB |
 
-Массив записей ограничен непосредственно в serde visitor, длина frame проверяется
-до выделения памяти. Лишние поля и неизвестные типы отклоняются. Остаются лимиты
-8 сессий, очередь reader 4 frames, 30 предложений/минуту и 128 уникальных ID за
-сессию. Манифест ограничивает расход памяти, глубину обхода и число создаваемых
-объектов. Диск не резервируется заранее; недостаток места завершает передачу
-ошибкой с очисткой staging. Лимиты не являются дисковой квотой на все сессии.
+The entry array is bounded directly in the serde visitor; frame length is checked
+before allocation. Extra fields and unknown types are rejected. Existing limits
+remain: 8 sessions, a 4-frame reader queue, 30 offers/minute, and 128 unique IDs per
+session. The manifest bounds memory use, traversal depth, and the number of created
+objects. Disk space is not reserved in advance; insufficient space fails the
+transfer and cleans up staging. These limits are not a disk quota across sessions.
 
-После `BundleOffer` используется существующий `FileAccept`. Только после Accept
-идут бинарные `FileChunk` для очередного файла, `BundleFileEnd` с индексом записи
-и BLAKE3, затем `BundleEnd` для всей операции. Индексы строго соответствуют порядку
-файлов манифеста; пропуски, повторы, лишние/недостающие байты и неверные хеши
-завершают сессию без публикации папки. Каталоги не требуют отдельных frames.
-`BundleFileEnd` не расходует keepalive-квоту: их количество ограничено манифестом
-и строгой последовательностью. Подтверждение всей операции — `FileComplete`.
+`BundleOffer` uses the existing `FileAccept` response. Only after Accept does the
+sender send binary `FileChunk` frames for each file, a `BundleFileEnd` with its entry
+index and BLAKE3 hash, and finally `BundleEnd` for the operation. Indices must follow
+the manifest's file order exactly. Skipped/repeated indices, extra/missing bytes,
+and invalid hashes end the session without publishing the folder. Directories need
+no separate frames. `BundleFileEnd` does not consume the keepalive quota: its count
+is bounded by the manifest and strict sequencing. `FileComplete` acknowledges the
+entire operation.
 
-Источник читает один файл за раз, держит один файловый handle и инкрементальный
-BLAKE3; получатель также держит только текущий файл. Файлы не собираются в памяти.
-Общий прогресс считает реальные payload-байты всех файлов, не сбрасывается между
-ними и не включает JSON, TLS overhead или время fsync. Обновления UI ограничены
-существующим таймером до 4 раз/с. Пустая операция имеет 0% до завершения, затем
-100%; ETA при отсутствии надёжной оценки не показывается.
+The source reads one file at a time with one file handle and an incremental BLAKE3
+hasher; the receiver also holds only the current file. Files are never assembled in
+memory. Total progress counts actual payload bytes across all files, never resets
+between files, and excludes JSON, TLS overhead, and fsync time. The existing timer
+limits UI updates to 4 per second. An empty operation remains at 0% until completion,
+then reaches 100%; ETA is hidden when no reliable estimate is available.
 
-## Пути, временное хранение и публикация
+## Paths, staging, and publication
 
-Каждый компонент проходит общие переносимые правила имён. Запрещены абсолютные
-пути, `.`/`..`, пустые компоненты, обратные слэши, Windows ADS/device aliases,
-управляющие и маскирующие bidi-символы, небезопасные окончания. Отсортированный
-манифест должен содержать каждый родительский каталог с точным написанием.
-Повторы и коллизии после Unicode lowercase отклоняются. Дополнительные коллизии
-конкретной файловой системы безопасно завершаются ошибкой `create_new`.
+Every component follows the shared portable filename rules. Absolute paths,
+`.`/`..`, empty components, backslashes, Windows ADS/device aliases, control and
+misleading bidi characters, and unsafe endings are rejected. The sorted manifest
+must include every parent directory with exactly matching spelling. Duplicate names
+and collisions after Unicode lowercase conversion are rejected. Additional
+filesystem-specific collisions fail safely through `create_new`.
 
-Обход источника отвергает symlinks и специальные объекты; Windows reparse points,
-включая junctions, тоже запрещены. Перед открытием очередного файла повторно
-проверяются его предки и размер. Одиночный источник открывается с O_NOFOLLOW на
-Linux и FILE_FLAG_OPEN_REPARSE_POINT на Windows. Исходники открываются только
-для чтения. Это не атомарный snapshot дерева: добавления/удаления после обхода,
-изменения содержимого той же длины и гонки с процессом того же локального аккаунта
-не дают snapshot-гарантий; доверенная локальная учётная запись остаётся границей
-модели угроз. Обычные изменения размера/подмена ссылкой приводят к отказу.
+Source traversal rejects symlinks and special objects; Windows reparse points,
+including junctions, are also forbidden. Each file's ancestors and size are checked
+again before opening it. A single-file source uses O_NOFOLLOW on Linux and
+FILE_FLAG_OPEN_REPARSE_POINT on Windows. Sources are opened read-only. This is not
+an atomic tree snapshot: additions/deletions after traversal, same-length content
+changes, and races with a process under the same local account have no snapshot
+guarantees. The trusted local account remains a threat-model boundary. Ordinary
+size changes or replacement with a link cause failure.
 
-После согласия создаётся приватный `.incoming-*` под фиксированным `received`
-профиля. Все каталоги и файлы находятся внутри `payload`; файлы создаются
-исключительно через create_new, с Unix mode 0600. Inbox/staging/receipt имеют
-Unix mode 0700; Windows использует ACL пользовательского профиля.
-После проверки каждого файла закрывается handle; fsync всех файлов выполняется
-перед публикацией в отдельной задаче финализации.
-До `BundleEnd` ни один файл операции не публикуется отдельно.
+After consent, a private `.incoming-*` directory is created under the profile's
+fixed `received` directory. All files and directories remain inside `payload`;
+files are created exclusively with create_new and Unix mode 0600.
+Inbox/staging/receipt directories use Unix mode 0700; Windows uses the user profile's
+ACLs. Each file handle closes after verification; all files are fsynced before
+publication in a separate finalization task. No individual file is published before
+`BundleEnd`.
 
-После проверки всех хешей/размеров дерево синхронизируется, затем целый `payload`
-переименовывается в `received-<уникальное имя>/<имя папки>` на той же FS:
-Linux использует renameat2(RENAME_NOREPLACE), Windows — MoveFileExW с flags=0.
-Ни файл, ни пустой/непустой каталог назначения не заменяются. Уникальный receipt
-сохраняет предыдущие операции с тем же названием. При неподдерживаемой FS или
-платформе операция отказывает без небезопасного fallback; macOS не является
-целевой платформой этого этапа. Windows/FS могут дополнительно ограничивать
-полную длину пути; такая ошибка очищает операцию.
+After all hashes/sizes pass verification, the tree is synchronized and the entire
+`payload` is renamed to `received-<unique name>/<folder name>` on the same filesystem.
+Linux uses renameat2(RENAME_NOREPLACE); Windows uses MoveFileExW with flags=0.
+Neither files nor empty/nonempty destination directories are replaced. A unique
+receipt preserves earlier operations with the same name. Unsupported filesystems
+or platforms fail without an unsafe fallback; macOS is outside this milestone's
+target platforms. Windows/filesystems can impose additional full-path length
+limits; such failures clean up the operation.
 
-Файлы и папки открываются атомарно для потребителя только после всех проверок.
-Для контракта MoveFileExW см. [Microsoft](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw).
-На Linux требование no-replace описано в [rename(2)](https://man7.org/linux/man-pages/man2/rename.2.html).
+Files and folders become available to consumers atomically only after all checks.
+See [Microsoft](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)
+for the MoveFileExW contract. The Linux no-replace requirement is documented in
+[rename(2)](https://man7.org/linux/man-pages/man2/rename.2.html).
 
-## Отмена и ошибки
+## Cancellation and errors
 
-Cancel с любой стороны отменяет всю операцию и закрывает TLS-сессию.
-Прежний CommitGate атомарно выбирает победителя между отменой и публикацией.
-До начала публикации отмена запрещает rename, а Drop удаляет staging целиком,
-включая уже проверенные файлы. После начала публикации Cancel возвращает
-CommitStarted; UI показывает Saving. Отдельная отслеживаемая задача владеет
-финализацией и сообщает её реальный результат даже после закрытия соединения.
-Никакой непроверенный файл не получает статус Completed.
+Cancel on either side cancels the entire operation and closes the TLS session.
+The existing CommitGate atomically chooses between cancellation and publication.
+Before publication starts, cancellation prevents rename and Drop removes the entire
+staging area, including verified files. Once publication begins, Cancel returns
+CommitStarted and the UI shows Saving. A separate tracked task owns finalization
+and reports its actual result even after the connection closes. No unverified file
+receives Completed status.
 
-Обрыв соединения до публикации также отменяет commit и очищает staging.
-Если отправитель отменил уже после публикации на получателе, проверенная папка
-может остаться: распределённой транзакции между устройствами нет. Отмена посреди
-незавершённого сетевого frame может выглядеть у другой стороны как Failed.
-Во время финализации обрабатываются keepalive: медленный fsync не блокирует
-ответы peer. Ожидание подтверждения/финализации ограничено пятью минутами;
-обычный idle timeout — 20 секунд, ожидание активности данных — 30 секунд.
-Системный зависший IO нельзя обещать мгновенно остановить. Ошибка directory fsync
-после успешного rename оставляет проверенное дерево, но возвращает ошибку.
-Аварийное завершение процесса/питания может оставить `.incoming-*`; автоматический
-startup janitor и гарантии сохранности при сбое питания здесь не реализованы.
+A disconnection before publication also cancels commit and cleans up staging. If
+the sender cancels after the receiver publishes, the verified folder may remain:
+there is no distributed transaction between devices. Cancellation in the middle of
+an incomplete network frame may appear as Failed to the other side. Keepalives
+continue during finalization, so slow fsync does not block peer responses.
+Acknowledgement/finalization waits are limited to five minutes; the ordinary idle
+timeout is 20 seconds, and the data-activity timeout is 30 seconds. A stalled system
+I/O operation cannot be promised to stop immediately. A directory fsync failure
+after successful rename leaves the verified tree but returns an error. A process
+crash or power loss may leave `.incoming-*` directories; this milestone does not
+implement a startup janitor or guarantee power-loss durability.
 
-## Проверки и ограничения
+## Validation and limitations
 
-Регрессии охватывают реальные TLS folder/multi-file операции, более 64 файлов,
-отказ, timeout, данные до согласия, неверный манифест/порядок/хеш, ранний BundleEnd,
-обрыв, обе стороны отмены и детерминированные гонки публикации. Общий прогресс
-проверяется на границах нескольких файлов на монотонность и точное число байтов.
-Отдельная регрессия удерживает commit и проверяет ответы keepalive до публикации
-для одиночного файла и папки. Есть проверки лимитов 4096 записей, глубины и метаданных, больших u64-размеров,
-повторных имён, обхода путей, symlinks, cleanup и no-replace rename.
+Regression tests cover real TLS folder/multi-file operations, more than 64 files,
+rejection, timeout, data before consent, invalid manifests/order/hashes, early
+BundleEnd, disconnections, cancellation by either side, and deterministic
+publication races. Total progress is checked at multiple file boundaries for
+monotonicity and exact byte counts. A separate regression holds commit and checks
+keepalive responses before publication for a single file and a folder. Tests also
+cover the 4096-entry, depth, and metadata limits, large u64 sizes, duplicate names,
+path traversal, symlinks, cleanup, and no-replace rename.
 
-На Linux sparse-файл 4 GiB + 17 байт полностью читается ограниченными чанками;
-отдельный тест передаёт его через настоящий TLS, получатель потоково проверяет
-BLAKE3 и точные u64-счётчики без записи 4 GiB на диск. Реальная запись и публикация
-дерева проверяются меньшими fixtures. Этот большой sparse-тест Unix-only;
-Windows CI проверяет u64 манифесты, обычные TLS/FS операции и no-replace publication.
+On Linux, a sparse file of 4 GiB + 17 bytes is read completely in bounded chunks.
+A separate test transfers it over real TLS; the receiver verifies BLAKE3 and exact
+u64 counters while streaming, without writing 4 GiB to disk. Smaller fixtures test
+actual tree writes and publication. The large sparse test is Unix-only; Windows CI
+checks u64 manifests, ordinary TLS/filesystem operations, and no-replace publication.
 
-Не входят в этап: resume, compression, FFmpeg, сохранение ACL/mtime/Unix executable
-bits, hardlink identity, snapshot файловой системы, индикатор обхода исходной
-папки, выбор destination, глобальные дисковые квоты. Два физических устройства,
-Windows GUI/нативные dialogs/Credential Manager и нестандартные сетевые FS требуют
-отдельных runtime испытаний. CI не заменяет эти проверки.
+Outside this milestone: resume, compression, FFmpeg, ACL/mtime/Unix executable-bit
+preservation, hardlink identity, filesystem snapshots, source-folder scanning
+progress, destination selection, and global disk quotas. Two physical devices,
+Windows GUI/native dialogs/Credential Manager, and unusual network filesystems need
+separate runtime tests. CI does not replace those checks.
 
-Локальная проверка 2026-11-14 (CachyOS/Niri): 87 Rust tests и 28 UI tests,
-Rustfmt, strict Clippy, обе TypeScript-проверки, Vite и locked Tauri release build
-прошли. Нативный production GUI при 360×420 использовал настоящий Secret Service,
-mDNS и TLS с отдельным Rust probe-отправителем: проверены pairing, имя папки,
-2 файла/1 MiB, запрет Accept без checkbox, Decline без сохранения, Accept с
-BLAKE3/совпадением байтов и сохранением вложенного/пустого каталога и zero-file.
-При следующей операции 256 MiB проверены частичный реальный прогресс, GUI Cancel
-получателя и отсутствие новых receipts/staging. Процессы завершились штатно.
-Probe задаёт источник непосредственно Rust API; GTK chooser не автоматизировался.
-Нативный ручной выбор файлов/папки и Windows GUI требуют отдельной проверки.
-Результат hosted CI относится к конкретному commit ветки `feature/large-files-folders`.
+Local validation on 2026-11-14 (CachyOS/Niri): 87 Rust tests and 28 UI tests,
+Rustfmt, strict Clippy, both TypeScript checks, Vite, and a locked Tauri release build
+passed. The native production GUI at 360×420 used real Secret Service, mDNS, and TLS
+with a separate Rust probe sender. Tests covered pairing, the folder name,
+2 files/1 MiB, Accept disabled until the checkbox was checked, Decline without
+saving, and Accept with BLAKE3/byte equality plus nested/empty directories and a
+zero-byte file. A subsequent 256 MiB operation verified real partial progress,
+receiver GUI Cancel, and no new receipts/staging. Processes exited normally.
+The probe supplies its source directly through the Rust API; the GTK chooser was
+not automated. Manual native file/folder selection and Windows GUI need separate
+verification. Hosted CI results apply to the specific commit on
+`feature/large-files-folders`.

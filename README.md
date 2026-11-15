@@ -49,17 +49,17 @@ substantial disk IO; resume avoids retransmitting verified data, not rereading i
 
 Optional OGG-to-MP3 conversion and post-transfer ZIP extraction are implemented
 with separate explicit approval. FFmpeg is selected locally and is not bundled.
-See [processing dependencies and security limits (Russian)](docs/optional-file-processing.md).
-Compression and OS sharing integration are **not implemented**. See [resumable transfers (Russian)](docs/resumable-transfers.md)
+See [processing dependencies and security limits](docs/optional-file-processing.md).
+Compression and OS sharing integration are **not implemented**. See [resumable transfers](docs/resumable-transfers.md)
 for consent, encrypted metadata, recovery, cleanup, limits and security considerations.
-See [large files and folders (Russian)](docs/large-files-folders.md) for the 2.6
+See [large files and folders](docs/large-files-folders.md) for the 2.6
 protocol and storage foundations.
 
-See [discovery architecture and testing (Russian)](docs/discovery.md) for protocol,
+See [discovery architecture and testing](docs/discovery.md) for protocol,
 privacy decisions, expiration/retry behavior, manual tests and limitations.
-See [secure pairing and threat model (Russian)](docs/security.md) for the pairing
+See [secure pairing and threat model](docs/security.md) for the pairing
 transport protocol, storage policy, approval boundaries and validation results.
-See [single-file transfer (Russian)](docs/transfers.md) for the initial wire format,
+See [single-file transfer](docs/transfers.md) for the initial wire format,
 safe storage, cancellation boundaries, tests and limitations.
 
 The intended product has no accounts, cloud services, advertisements or paid APIs.
@@ -67,11 +67,11 @@ Original files must never be modified by future preparation features.
 
 Incoming requests show the device-reported sender name, readable size and explicit
 Accept/Decline states. Acceptance requires confirming the specific file; expired
-requests cannot be approved. See [receiver acceptance (Russian)](docs/receiver-acceptance.md).
+requests cannot be approved. See [receiver acceptance](docs/receiver-acceptance.md).
 
 Transfers display measured bytes, data percentage, MiB/s and ETA when reliable,
 with a Cancel action on both sides. A cancelled transfer closes the TLS session.
-See [progress and cancellation (Russian)](docs/transfer-progress.md) for finalization
+See [progress and cancellation](docs/transfer-progress.md) for finalization
 races, testing and limitations.
 
 ## Development
@@ -220,4 +220,4 @@ still pending; no claim of a local Windows test is made.
 
 Optional OGG-to-MP3 preparation and post-transfer ZIP extraction require separate
 explicit approval. FFmpeg is optional, selected locally, and not bundled.
-See [processing dependencies, security limits and tests (Russian)](docs/optional-file-processing.md).
+See [processing dependencies, security limits and tests](docs/optional-file-processing.md).

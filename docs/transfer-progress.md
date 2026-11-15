@@ -1,87 +1,89 @@
-# Milestone 2.5 — прогресс, скорость и отмена
+# Milestone 2.5 — Transfer Progress, Speed, and Cancellation
 
-Актуальное дополнение Milestone 2.7: [восстановление передач](resumable-transfers.md).
+Current Milestone 2.7 supplement: [resumable transfers](resumable-transfers.md).
+The Milestone 2.6 large-file/folder extensions are documented in
+[large-files-folders.md](large-files-folders.md). This document retains the
+historical Milestone 2.5 context.
 
+## Actual byte counts and estimates
 
-Актуальный протокол Milestone 2.6, папки, лимиты и совместимость с 2.5 описаны
-в [large-files-folders.md](large-files-folders.md). Ниже сохранён контекст своего этапа.
+The existing TLS 1.3 transport, 64 KiB chunks, and BLAKE3 verification are preserved;
+no new libraries were added. The sender counts payload after completed `send/flush`
+frames; the receiver counts it after `Sink.write/flush`. These are local byte
+counts, excluding TCP retransmissions and TLS overhead, rather than durable peer
+acknowledgements. In-flight values can differ between sides. On completion, both
+reach the file size, and originals remain unchanged.
 
+Rust exposes `transferred`, `bytesPerSecond`, and `etaSeconds`. Counters advance
+only per actual chunk, while full snapshots/events are limited to one every 250 ms
+during activity. There is no timer while waiting for approval or after completion,
+and the frontend adds no timers in this milestone. Speed uses an approximately
+1-second window with up to 5 monotonic samples. ETA appears only after 1 second at a
+positive speed with bytes remaining, and only if the estimate is at most one day.
+It disappears when progress stalls. These are throughput estimates, not fsync
+guarantees.
 
-## Измерения
+Payload progress can reach 100% before Completed: BLAKE3, saving, and acknowledgement
+still follow. An empty file stays at 0% until Completed, then reaches 100%, without
+invented speed/ETA. The existing 4 GiB limit remains in this milestone.
 
-Используется существующая TLS 1.3 сессия, streaming 64 KiB и BLAKE3; новые
-библиотеки не добавлены. Sender считает payload завершённых `send/flush` frames,
-receiver — чанки после `Sink.write/flush`. Это локально обработанные байты, а не
-TCP retransmits, overhead TLS или подтверждение сохранения на другом устройстве.
-В полёте счётчики двух сторон могут различаться. На успешном завершении оба равны
-заявленному размеру; источник не меняется.
+## Cancellation protocol
 
-`transferred`, `bytesPerSecond`, `etaSeconds` приходят из Rust. На каждый chunk
-меняется только счётчик; полная сериализация snapshot/event выполняется не чаще
-раза в 250 ms во время передачи. В ожидании согласия/после завершения timer не
-работает, frontend не создаёт таймеров. Окно скорости — примерно 1 s, до пяти
-samples по монотонным часам. ETA показывается после 1 s при положительной
-измеренной скорости, оставшихся байтах и оценке не больше суток. При остановке
-потока ETA исчезает. Это оценка пропускной способности, не обещание времени fsync.
+Both sides have `Cancel transfer` bound to the connection ID and transfer ID.
+Receiver Decline keeps the connection; Cancel closes TLS and requires reconnect
+before another file.
+Duplicate/stale cancellation cannot affect a new transfer. The UI shows cancelling,
+then cancelled after stopping; network failures show Failed.
 
-Полоса и процент относятся к **данным**. 100% байтов ещё не означает Completed:
-следующие состояния — проверка BLAKE3, сохранение и подтверждение receiver.
-Для пустого файла в ожидании/проверке 0%, после Completed — 100%; скорость/ETA
-не выдумываются. Файлы до 4 GiB и прежние ограничения ресурсов сохранены.
+A separate watch channel delivers cancellation without queuing behind file writes
+or UI actions. At a frame boundary, the peer sends `file_cancel(id)` with a 500 ms
+deadline, then performs TLS shutdown within at most 1 s. The reader handles cancel
+outside the file queue, including during finalization. Mid-frame cancellation
+cannot append a control message safely and closes the connection. The peer may
+therefore see Failed instead of Cancelled, but no incomplete file is published.
 
-## Cancel и граница сохранения
+ALPN `invardrop/4` and hello version 4 require both applications to update.
+Identities and stored trust remain unchanged.
 
-Обе стороны имеют `Cancel transfer`, привязанный к connection + transfer ID.
-Ожидающий receiver может использовать Decline, сохраняя соединение. Cancel
-передачи закрывает TLS-сессию; для следующего файла нужен reconnect. Повторный
-или устаревший Cancel не применяется к новому файлу. UI показывает Cancelling,
-затем Cancelled после остановки; ошибки сети остаются Failed.
+## Cancellation and finalization races
 
-Отмена сигнализируется отдельным watch, поэтому не ждёт завершения записи чанка
-или очереди UI actions. Если writer находится на границе frame, отправляется
-`file_cancel(id)` с deadline 500 ms, затем TLS shutdown до 1 s. Reader обрабатывает
-его отдельно от очереди файлов, включая время finalization. Если frame оборван
-посередине, дописывать control message нельзя: сессия закрывается. Peer в этом
-случае может видеть Failed вместо Cancelled, но неполный файл не публикуется.
-ALPN/hello явно обновлены до `invardrop/4` / version 4; обе стороны нужно обновить,
-identity/trust остаются прежними.
+`CommitGate` atomically chooses between cancellation and publication. Cancellation
+before publication prevents `persist_noclobber`, deletes the tempfile, and forbids a
+late Completed result. Once commit starts, cancellation is rejected with an explicit
+error; the UI displays Saving verified file and hides Cancel, avoiding a false
+Cancelled state.
 
-`CommitGate` атомарно выбирает одно из двух решений:
+Cancellation remains possible during flush/fsync. A tracked task owns finalization,
+waits for the actual OS result, and checks the gate before publication. Transport
+loss cancels an unpublished commit. No-clobber publication, size/hash validation,
+safe names, and explicit receiver approval are preserved.
 
-- Cancel принят до начала публикации: finalizer не может выполнить
-  `persist_noclobber`, tempfile удаляется, поздний callback не создаёт Completed.
-- Публикация уже началась: Cancel отклоняется с явной ошибкой, UI показывает
-  Saving verified file и убирает Cancel. Ложного состояния Cancelled нет.
+## Validation results
 
-Во время flush/fsync отмена остаётся доступной. Финализацией владеет отдельная
-задача, которая дожидается операции ОС и публикует реальный результат; она учтена
-при shutdown. Перед атомарной публикацией проверяется gate. Потеря транспорта
-также отменяет ещё не опубликованную finalization. Существующие no-clobber,
-размер/hash, безопасные имена и explicit receiver acceptance сохранены.
+66 Rust tests, 23 UI tests, Rustfmt, strict Clippy, TypeScript, and a locked Tauri
+production build passed. Regressions cover empty/multichunk files and exact totals;
+real TLS progress monotonicity, snapshot throttling, and ETA; sender cancellation under backpressure;
+receiver cancellation after bytes arrive; stale/repeated cancellation; deterministic
+races before/after the commit gate; disconnection during finalization; cleanup;
+and no false completion.
 
-## Проверки и границы
+The native Linux GUI at 360×420 used real keyring, mDNS, and TLS with a diagnostic
+sender. Tests covered Decline without a file, a successful 1 MiB transfer with hash/
+byte comparison, and a subsequent transfer with actual partial progress followed
+by receiver Cancel. Only the test sender paused after sending real data; no OS
+network settings or simulated progress were used. Staging was removed, the earlier
+receipt remained, the peer showed Cancelled, and the GUI exited with code 0.
+Sender Cancel is covered by Rust and UI tests. The two separate test profiles used
+separate credentials, which were deleted afterwards.
 
-Локально прошли 66 Rust-тестов и 23 UI-теста, Rustfmt, strict Clippy, TypeScript и
-locked Tauri production build. Среди регрессий: точные totals пустого/многокадрового
-файла; реальный TLS stream с монотонными snapshots, ограниченной частотой и ETA;
-sender cancel при backpressure; receiver cancel после записи байтов; stale и
-повторный Cancel; управляемая гонка до/после commit boundary; disconnect во время
-finalization; отсутствие final file/ложного Completed после принятой отмены.
+## Remaining limitations
 
-Native Linux receiver проверен при 360×420 с настоящим Secret Service/mDNS/TLS и
-диагностическим sender: Decline без файла, успешный приём 1 MiB с BLAKE3/сравнением
-байтов, реальный частичный прогресс следующего файла и Cancel кнопкой receiver.
-Приостановлен только созданный тестовый sender после реальной отправки части
-данных; сетевые настройки ОС не менялись и значения прогресса не подставлялись.
-После Cancel staging удалён, прежний завершённый файл сохранился, sender также
-получил Cancelled, GUI exit 0. Sender Cancel покрыт Rust и UI тестами. Два профиля
-использовали отдельные credentials, удалённые после проверки.
+Windows GUI/keyring, the native sender picker, and two physical devices have not
+been verified. There is no resume or distributed transaction in this milestone.
+If the sender cancels while waiting after the receiver has published but before
+acknowledgement, the valid file may remain; it is not deleted automatically.
 
-Windows GUI/keyring, native picker sender и два физических устройства отдельно
-не проверялись. Нет resume/транзакции между устройствами: sender может отменить
-ожидание, когда receiver уже сохранил целый проверенный файл, а ack ещё не дошёл.
-Сохранённый файл автоматически не удаляется. Операции ОС/блокирующий fsync нельзя
-мгновенно прервать; Cancelling может задержаться до освобождения IO. При crash,
-аварийном shutdown или ошибках удаления могут остаться staging artifacts;
-незавершённые данные не считаются успешно полученными. Смена скорости/сети делает
-ETA приблизительным. Эти границы не являются гарантией распределённой атомарности.
+Blocking OS I/O/fsync cannot be aborted instantly, so Cancelling can wait for I/O.
+A crash, abnormal shutdown, or deletion error can leave staging behind, without
+reporting false completion. Speed varies with network conditions, ETA is approximate,
+and no distributed atomicity is promised.

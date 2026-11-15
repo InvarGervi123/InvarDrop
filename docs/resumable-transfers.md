@@ -1,250 +1,247 @@
-# Milestone 2.7 — возобновляемые передачи
+# Milestone 2.7 — Resumable Transfers
 
-## Что сохраняется и как продолжить
+## What persists and how to resume
 
-Новая передача между экземплярами с поддержкой resume получает случайный UUIDv4.
-Она может содержать один файл, несколько выбранных файлов или вложенную папку.
-После обрыва сети, закрытия приложения или временной недоступности устройства
-сохраняются исходный манифест, привязка к доверенному ключу peer и подтверждённая
-часть данных. Успешное повторное соединение само по себе **не начинает передачу**.
+A new transfer between resume-capable instances receives a random UUIDv4. It can
+contain one file, several selected files, or a nested folder. After a network
+interruption, application shutdown, or temporary device unavailability, the original
+manifest, trusted peer-key binding, and verified portion of the data persist.
+A successful reconnection alone **does not start a transfer**.
 
-Раздел `Transfer recovery` показывает отдельные операции: имя, направление,
-ключ peer, общий размер, проверенные и оставшиеся байты, процент. Пока peer не
-подключён, Resume выключен, Discard доступен. При соединении проверяются фактический
-доверенный TLS-ключ и согласованная поддержка resume, а не mDNS-имя устройства.
+`Transfer recovery` lists individual operations: name, direction, peer key, total
+size, verified and remaining bytes, and percentage. Resume is disabled while the
+peer is offline; Discard remains available. Connection matching checks the actual
+trusted TLS key and negotiated resume support, rather than the device's mDNS name.
 
-Чтобы продолжить:
+To resume:
 
-1. Подключить доверенные устройства. Resume становится доступен для подходящего
-   peer, если его соединение не занято другой операцией.
-2. Отправитель отмечает подтверждение для конкретной записи и нажимает Resume.
-   Если Resume первым нажал получатель, отправитель получает запрос: это только
-   уведомление, отправитель всё равно должен подтвердить Resume у себя.
-3. Получатель заново подтверждает предложение через checkbox и Accept. До этого
-   момента сохранённые данные остаются изолированными; payload не продолжается.
+1. Connect the trusted devices. Resume becomes available for the matching peer
+   when its connection is not occupied by another operation.
+2. The sender checks confirmation for the specific record and clicks Resume.
+   If the receiver clicks Resume first, the sender receives a request: this is
+   only a notification, and the sender must still explicitly approve Resume locally.
+3. The receiver approves the offer again through the checkbox and Accept. Until
+   then, saved data stays isolated and payload transmission does not continue.
 
-Decline и истечение предложения сохраняют прежнюю recovery-запись. Для нового
-предложения с тем же постоянным UUID требуется новое TLS-соединение: повторное
-использование ID в одной сессии запрещено, чтобы старое согласие не подтвердило
-новую попытку. После reconnect интерфейс требует свежего checkbox. Никакого
-автоматического resume или скрытого восстановления доверия нет.
+Decline and offer expiration preserve the existing recovery record. A new offer
+with the same persistent UUID requires a new TLS connection: reusing an ID within
+one session is forbidden so that old consent cannot approve a new attempt. After
+reconnect, the UI requires a fresh checkbox confirmation. There is no automatic
+resume or silent restoration of trust.
 
-**Cancel и Discard различаются.** Cancel останавливает активную операцию и
-закрывает соединение. До начала публикации неполные полученные данные удаляются,
-позиция сбрасывается в ноль; recovery-запись позволяет начать заново после нового
-согласия. Discard с отдельным подтверждением удаляет неактивную recovery-запись и
-её staging. Исходные файлы отправителя не удаляются. Discard активной операции
-запрещён; сначала требуется Cancel. Отдельные устройства не выполняют общую
-транзакцию удаления: сохранённая запись другого устройства может потребовать
-Discard на той стороне или дождаться срока очистки.
+**Cancel and Discard have different effects.** Cancel stops the active operation
+and closes the connection. Before publication begins, incomplete received data is
+deleted and the position resets to zero; the recovery record allows a fresh start
+after new consent. Discard, with separate confirmation, deletes an inactive recovery
+record and its staging. The sender's original files are never deleted. Discard is
+forbidden for an active operation; Cancel is required first. Devices do not share
+a deletion transaction: the other device's saved record may need a separate Discard
+there or remain until cleanup expiration.
 
-Если FileCancel невозможно безопасно дописать после частично отправленного TLS
-frame, соединение закрывается. Другой peer может воспринять это как обрыв сети
-и сохранить уже проверенный checkpoint. Он не продолжит передачу автоматически;
-для удаления его recovery-данных потребуется локальный Discard. Устройство,
-на котором нажат Cancel, сбрасывает собственные частичные данные.
+If FileCancel cannot safely be appended after a partially sent TLS frame, the
+connection closes. The other peer may interpret this as a network interruption and
+retain its verified checkpoint. It never resumes automatically; removing its
+recovery data requires local Discard. The device where Cancel was clicked resets
+its own partial data.
 
-## Проверяемые checkpoints
+## Verifiable checkpoints
 
-Перед первым предложением Rust формирует полный ограниченный манифест и считает
-BLAKE3 каждого исходного файла потоково. В отличие от обычной передачи 2.6 это
-требует прочитать исходники до начала отправки. Данные по сети по-прежнему идут
-чанками не более 64 KiB, без загрузки целого файла в память и с одним текущим
-файловым handle.
+Before the first offer, Rust builds a complete bounded manifest and computes each
+source file's BLAKE3 hash in a streaming pass. Unlike ordinary 2.6 transfers, this
+requires reading sources before sending starts. Network data still uses chunks of
+at most 64 KiB, without loading a whole file into memory and with one current file
+handle.
 
-Checkpoint обозначает непрерывно проверенный префикс операции: индекс очередной
-записи, `u64` offset в файле и BLAKE3 его префикса. Сначала полностью завершаются
-предшествующие файлы, затем сохраняется префикс текущего. Каталоги данных не имеют.
-Промежуточные checkpoints идут каждые **16 MiB**; допускается завершающий checkpoint
-на точном конце файла. Перед переходом к следующему файлу проверяется его полный
-BLAKE3, включая файлы нулевой длины.
+A checkpoint identifies a continuously verified operation prefix: the next entry
+index, a `u64` file offset, and the prefix's BLAKE3 hash. Earlier files finish
+completely before the current file's prefix is saved. Directories carry no data.
+Intermediate checkpoints occur every **16 MiB**; a final checkpoint may occur at
+the exact end of a file. Each file's complete BLAKE3 is verified before advancing
+to the next, including zero-byte files.
 
-Получатель самостоятельно сравнивает объявленную позицию с фактически записанными
-байтами и своим BLAKE3. Позиции за концом файла, неверный индекс, неправильный хеш,
-смещение вне разрешённой границы и неожиданные фазы отвергаются. Перед сохранением
-checkpoint выполняется `sync_all` данных, затем атомарно записываются и
-синхронизируются метаданные, и только после этого отправляется ResumeAck.
-Отправитель также сохраняет подтверждённую позицию. Он не считает факт отправки
-байтов доказательством их сохранения на другой стороне.
+The receiver independently compares the declared position with actual written bytes
+and its own BLAKE3. Positions beyond EOF, invalid indices/hashes, offsets outside
+allowed boundaries, and unexpected phases are rejected. Checkpoint persistence
+first calls `sync_all` on data, then atomically writes and synchronizes metadata,
+and only then sends ResumeAck. The sender also saves the acknowledged position.
+Sending bytes alone is never treated as proof that the other side persisted them.
 
-После рестарта или нового согласия получатель перечитывает сохранённые завершённые
-файлы и текущий префикс, проверяет их размер и BLAKE3. Неподтверждённый хвост
-обрезается, более поздние непроверенные файлы удаляются. Отправитель перед каждым
-resume заново проверяет **все** исходные файлы по сохранённым размерам и полным
-хешам, затем проверяет запрошенный префикс. Таким образом совпадения имени или
-размера недостаточно: изменение содержимого той же длины тоже приводит к отказу.
-Offset не принимается как самостоятельное основание пропустить данные.
+After restart or renewed consent, the receiver rereads saved complete files and the
+current prefix, checking their sizes and BLAKE3. Unacknowledged tails are truncated;
+later unverified files are removed. Before every resume, the sender revalidates
+**all** source files against their saved sizes and full hashes, then checks the
+requested prefix. Matching names or sizes are therefore insufficient: same-length
+content changes also cause rejection. An offset alone never justifies skipping data.
 
-Потерянный последний Ack может привести к повторной передаче последнего
-неподтверждённого участка. При обычном обрыве это не более одного интервала
-checkpoint текущего файла. Удалённый, повреждённый или неаутентичный checkpoint
-не восстанавливается угадыванием позиции: такая recovery-запись очищается,
-передачу потребуется создать заново. Завершённые пользовательские receipts при
-этом не удаляются.
+A lost final Ack can cause retransmission of the last unacknowledged segment.
+For an ordinary interruption, this is at most one checkpoint interval of the current
+file. A deleted, corrupted, or unauthentic checkpoint is never recovered by guessing
+a position: the recovery record is cleaned up, and a new transfer must be created.
+Completed user receipts are not deleted.
 
-Прогресс активного resume начинается с проверенных байтов и увеличивается только
-на фактически переданные payload-байты. Скорость и ETA считаются относительно
-этой стартовой позиции, поэтому сохранённые данные не создают ложный скачок
-MiB/s. Проверка исходников, fsync и проверка staging не входят в сетевую скорость.
-Для пустой операции процент остаётся 0 до завершения, затем становится 100.
+Active resume progress starts at verified bytes and increases only for actual
+transferred payload bytes. Speed and ETA use that starting position, so saved data
+cannot create a false MiB/s spike. Source validation, fsync, and staging verification
+are excluded from network speed. An empty operation stays at 0% until completion,
+then reaches 100%.
 
-## Привязка к доверию и защита метаданных
+## Trust binding and metadata protection
 
-TLS 1.3, проверка SPKI, pairing и OS keyring сохраняются. Новый ALPN —
-`invardrop/6`, hello version 6. Для peer 2.6 согласуется `invardrop/5` с обычной
-передачей файлов/папок; для 2.5 — `invardrop/4` с одиночными файлами до 4 GiB.
-Такие старые передачи не становятся возобновляемыми задним числом.
+TLS 1.3, SPKI verification, pairing, and the OS keyring are preserved. The new ALPN
+is `invardrop/6`, with hello version 6. A 2.6 peer negotiates `invardrop/5` for ordinary
+file/folder transfer; a 2.5 peer negotiates `invardrop/4` for single files up to 4 GiB.
+Such legacy transfers do not become resumable retroactively.
 
-Recovery-запись связывает UUID, направление, полный ключ первоначального peer,
-манифест со всеми хешами, позицию и epoch доверия. Назначение берётся только из
-фиксированного `received` профиля; исходные пути появляются только из нативного
-выбора в Rust. IPC Resume/Discard принимает идентификаторы, а не filesystem paths.
-Манифест использует переносимые правила 2.6: нет абсолютных путей, traversal,
-небезопасных компонентов, symlinks/reparse points или неявной замены файлов.
+A recovery record binds the UUID, direction, full original peer key, manifest with
+all hashes, position, and trust epoch. Destinations come only from the profile's
+fixed `received` directory; source paths come only from native selection in Rust.
+Resume/Discard IPC accepts identifiers, never filesystem paths. The manifest follows
+2.6's portable rules: no absolute paths, traversal, unsafe components,
+symlinks/reparse points, or implicit file replacement.
 
-Метаданные `resume-v1/<UUID>/checkpoint.enc` защищены ChaCha20-Poly1305 с отдельным
-ключом, полученным через domain-separated BLAKE3 derivation из keyring master key.
-Каждая запись имеет новый случайный nonce. Версия/назначение envelope и epoch
-входят в AAD. Identity/trust ciphertext не является допустимым checkpoint и наоборот.
-Запись содержит локальные пути отправителя, но они не передаются в frontend или
-peer. Содержимое staging-файлов **не шифруется на диске**: его защищают приватный
-каталог профиля и права ОС, как и обычные полученные файлы.
+Metadata in `resume-v1/<UUID>/checkpoint.enc` is protected by ChaCha20-Poly1305 with
+a separate key derived from the keyring master key using domain-separated BLAKE3
+derivation. Each write uses a new random nonce. The envelope version/purpose and
+epoch are included in AAD. Identity/trust ciphertext is not a valid checkpoint, or
+vice versa. Records contain the sender's local paths, but these are never sent to
+the frontend or peer. Staging file contents are **not encrypted on disk**; the
+private profile directory and OS permissions protect them, as with ordinary
+received files.
 
-Любой Revoke увеличивает сохраняемый глобальный resume epoch. Для простоты и
-безопасности это инвалидирует **все** старые recovery-записи профиля, в том числе
-записи других peer. Unblock или новое pairing не возвращают прежние checkpoints.
-При ошибке долговечного сохранения revoke старый epoch запрещён в текущем
-процессе; как и для самого trust, гарантия после рестарта требует успешной записи
-на диск. Ошибка keyring/storage не включает plaintext fallback.
+Every Revoke increments the persisted global resume epoch. For simplicity and
+security, this invalidates **all** older recovery records in the profile, including
+other peers' records. Unblock or new pairing never restores old checkpoints.
+If durable revocation persistence fails, the old epoch is forbidden in the current
+process; as with trust itself, guarantees after restart require a successful disk
+write. Keyring/storage errors never enable a plaintext fallback.
 
-При открытии старого профиля без resume_epoch версия 2.7 атомарно сохраняет это
-поле до запуска восстановления. Старый бинарник 2.6 с deny_unknown_fields после
-этого откажется открыть профиль: downgrade профиля не поддерживается. Это не
-мешает сетевой совместимости ALPN 4/5 между разными профилями/устройствами и не
-даёт старой версии незаметно отозвать доверие без смены поколения checkpoints.
+When opening an older profile without resume_epoch, version 2.7 atomically saves
+that field before recovery starts. An older 2.6 binary using deny_unknown_fields
+will then refuse to open the profile: profile downgrade is unsupported. This does
+not prevent ALPN 4/5 network compatibility between different profiles/devices, and
+prevents an older version from silently revoking trust without changing the
+checkpoint generation.
 
-Это защита от сетевого противника и случайной порчи диска. Она не заменяет
-защиту от процесса с полномочиями того же пользователя и не обнаруживает rollback
-всего старого корректного профиля вместе с его trust state. Источник не является
-атомарным filesystem snapshot: приложение перепроверяет файлы, но не блокирует
-внешние процессы на всё время операции.
+These measures protect against network attackers and accidental disk corruption.
+They do not replace protection from a process running as the same user or detect
+rollback of an entire older valid profile together with its trust state. Sources
+are not atomic filesystem snapshots: the application rechecks files but does not
+lock out external processes for the entire operation.
 
-## Публикация и восстановление после crash
+## Publication and crash recovery
 
-Неполная папка находится в приватном `resume-v1/<UUID>/payload`, отдельно от
-завершённых файлов. Успешные промежуточные файлы не публикуются по одному.
-В финализации повторно проверяются все файлы, синхронизируются данные и каталоги,
-после чего CommitGate выбирает между отменой и началом публикации.
+An incomplete folder stays in private `resume-v1/<UUID>/payload`, separate from
+completed files. Verified intermediate files are never published individually.
+Finalization rechecks all files, synchronizes data/directories, then uses CommitGate
+to choose between cancellation and the start of publication.
 
-Перед rename сохраняется журнал с новым случайным именем receipt. Завершённый
-файл или всё дерево публикуется одной no-replace операцией на той же FS
-(Linux renameat2 / Windows MoveFileExW). Существующее назначение не заменяется.
-После rename сохраняется отметка `completed`; получатель посылает ResumeComplete,
-отправитель отвечает ResumeCompleteAck. Получатель удаляет recovery-журнал лишь
-после этого подтверждения.
+Before rename, a journal with a new random receipt name is persisted. The completed
+file or entire tree is published through one no-replace operation on the same
+filesystem (Linux renameat2 / Windows MoveFileExW). Existing destinations are never
+replaced. After rename, a `completed` marker is saved; the receiver sends
+ResumeComplete, and the sender replies ResumeCompleteAck. Only after that
+acknowledgement does the receiver delete the recovery journal.
 
-При crash до rename сохранённый payload остаётся кандидатом на проверку и resume.
-Если rename уже произошёл, а запись `completed` ещё не успела сохраниться,
-восстановление проверяет фактическое опубликованное дерево по полному манифесту
-и признаёт его завершённым. Если потерялось сетевое подтверждение, новое
-предложение того же UUID подтверждает уже завершённый receipt, а не создаёт копию.
-Оба сценария требуют сохранного аутентичного журнала и корректных данных.
+A crash before rename leaves the saved payload available for validation and resume.
+If rename has occurred but `completed` has not yet been saved, recovery verifies
+the actual published tree against the full manifest and recognizes completion.
+If network acknowledgement was lost, a new offer with the same UUID acknowledges
+the already completed receipt instead of creating a copy. Both scenarios require
+an intact authentic journal and valid data.
 
-После начала публикации Cancel возвращает CommitStarted. Владелец финализации
-обязан сообщить её фактический результат даже после закрытия соединения. При
-потере связи на этой границе папка может уже находиться у получателя, а отправитель
-ещё видеть ошибку; распределённого атомарного commit между устройствами нет.
-Перезапуск и завершительный обмен устраняют неоднозначность, пока сохранены
-журналы. При повреждении/потере журнала приложение не угадывает связь с receipt и
-не удаляет опубликованные пользовательские данные.
+After publication starts, Cancel returns CommitStarted. The finalization owner
+must report its actual result even after the connection closes. A disconnection
+at this boundary may leave the folder on the receiver while the sender still sees
+an error; there is no distributed atomic commit between devices. Restart and the
+completion exchange resolve ambiguity while journals remain intact. If a journal
+is corrupted/lost, the application neither guesses its association with a receipt
+nor deletes published user data.
 
-## Лимиты, очистка и практические ограничения
+## Limits, cleanup, and practical limitations
 
-| Ресурс | Предел |
+| Resource | Limit |
 | --- | --- |
-| Одна операция / файл | 1 TiB |
-| Записи в дереве, включая каталоги | 4096 |
-| Глубина / компонент / относительный путь | 16 / 200 / 1024 байта |
-| Манифест дерева / манифест с хешами | 240 KiB / 512 KiB |
+| Operation / single file | 1 TiB |
+| Tree entries, including directories | 4096 |
+| Depth / component / relative path | 16 components / 200 bytes / 1024 bytes |
+| Tree manifest / manifest including hashes | 240 KiB / 512 KiB |
 | ResumeOffer frame | 768 KiB |
-| Зашифрованная recovery-запись | до 8 MiB |
-| Recovery-записи профиля | 8 |
-| Сумма объявленных размеров recovery-записей | 2 TiB |
-| Возраст неактивной recovery-записи | 7 суток |
-| Ожидание проверки/подтверждения/финализации | до 5 минут |
+| Encrypted recovery record | Up to 8 MiB |
+| Recovery records per profile | 8 |
+| Sum of recovery records' declared sizes | 2 TiB |
+| Inactive recovery record age | 7 days |
+| Verification/acknowledgement/finalization wait | Up to 5 minutes |
 
-Возраст считается по последнему сохранённому checkpoint/изменению записи, не по
-факту простого показа в UI. При загрузке и перечитывании каталога удаляются
-просроченные, отозванные и повреждённые UUID-записи; активные leased-операции не
-трогаются. Неизвестные имена вне этого формата не используются как пути удаления.
-Журналы завершённых, но ещё не подтверждённых операций тоже занимают место в
-лимите до ResumeCompleteAck, ручного Discard или очистки по возрасту. Они видны
-отдельно как `Completed · awaiting acknowledgement`, без Resume. Их Discard
-удаляет только recovery-метаданные; опубликованные файлы остаются на месте.
-Если после ручного удаления журнала другая сторона всё ещё хранит старую запись
-и повторно предложит тот же UUID, это станет новым предложением с обязательным
-согласием получателя: может появиться ещё один отдельный receipt, но существующие
-данные не заменяются.
+Age is measured from the last saved checkpoint/record change, not from merely
+showing it in the UI. Loading and rescanning the directory removes expired, revoked,
+and corrupted UUID records; actively leased operations are left untouched. Unknown
+names outside this format are never used as deletion paths. Journals of completed
+but unacknowledged operations also consume the limit until ResumeCompleteAck,
+manual Discard, or age-based cleanup. They appear separately as
+`Completed · awaiting acknowledgement`, without Resume. Discard removes only their
+recovery metadata; published files remain. If the other side retains an old record
+after manual journal deletion and offers the same UUID again, it becomes a new
+offer requiring receiver consent. Another separate receipt may be created, but
+existing data is never replaced.
 
-2 TiB — ограничение суммы объявлений, не предварительное выделение места и не
-гарантия свободного диска. Остаётся не более одного неподтверждённого интервала
-на активную операцию; исчерпание места безопасно останавливает запись. Если
-metadata недоступны или повреждены, полезные байты могут оказаться невозобновляемыми.
-Восстановление сохраняет проверяемые данные, а не обещает отсутствие повторного IO.
+The 2 TiB limit bounds declared totals; it neither preallocates storage nor
+guarantees free disk space. Each active operation retains at most one unacknowledged
+interval; disk exhaustion safely stops writing. If metadata is inaccessible or
+corrupted, useful bytes may become impossible to resume. Recovery preserves
+verifiable data rather than promising no repeated I/O.
 
-Большие исходники и staging могут потребовать длительного полного перечитывания.
-При превышении пятиминутного ожидания операция завершится безопасной ошибкой;
-неотменяемая операция ОС может закончиться позже, но не получает право обойти
-CommitGate. Медленный сетевой диск или очень большое дерево могут потребовать
-новой попытки. Без источников и профиля отправителя продолжение не работает;
-независимое завершение операции одним получателем в этот этап не входит.
+Large sources and staging may require lengthy full rereads. Exceeding the
+five-minute wait safely fails the operation; an uninterruptible OS operation may
+finish later but cannot bypass CommitGate. A slow network disk or very large tree
+may require another attempt. Resume requires the sender's sources and profile;
+independent completion by the receiver alone is outside this milestone.
 
-На Unix применяются приватные permissions; на Windows — ACL пользовательского
-профиля. `sync_all`, атомарная замена metadata и no-replace rename зависят от
-контрактов ОС/FS. Гарантии при физическом сбое питания, повреждении контроллера,
-зависшем IO и на нестандартных сетевых FS не эквивалентны проверенному штатному
-перезапуску процесса. После сбоя возможны остатки временных служебных файлов;
-приложение не объявляет их завершённой передачей.
+Unix uses private permissions; Windows uses the user profile's ACLs. `sync_all`,
+atomic metadata replacement, and no-replace rename depend on OS/filesystem
+contracts. Guarantees under physical power loss, controller corruption, stalled
+I/O, or unusual network filesystems are not equivalent to a tested normal process
+restart. A crash can leave temporary service files; the application never declares
+them completed transfers.
 
-В этом этапе нет compression, FFmpeg, chunk maps/Merkle trees, параллельного
-скачивания файлов, автоматического resume, background sender daemon, сохранения
-mtime/ACL/executable bits или snapshot файловой системы. Поведение Windows GUI,
-native dialogs, системного Credential Manager и двух физических устройств
-проверяется отдельно; успешный CI не доказывает эти runtime-сценарии.
+This milestone excludes compression, FFmpeg, chunk maps/Merkle trees, parallel
+file downloads, automatic resume, a background sender daemon, mtime/ACL/executable-
+bit preservation, and filesystem snapshots. Windows GUI, native dialogs, system
+Credential Manager, and two physical devices require separate checks; successful
+CI does not prove these runtime scenarios.
 
-## Проверки
+## Validation
 
-Автоматические регрессии включают реальный TLS, повторные обрывы и restart с тем
-же ключом профиля, вложенное дерево/empty directories/zero-file, сохранение и
-повторную проверку префикса, недопустимые offsets/порядок/хеши, данные до согласия,
-Cancel против Discard и revoke/unblock с невозможностью вернуть старый epoch.
-Отдельные тесты хранения проверяют authenticated metadata, crash-состояния
-публикации, no-replace, пределы записей и cleanup. UI-тесты проверяют отсутствие
-автоматического resume, конкретное согласие, offline/legacy/revoked состояния,
-повторный reconnect, двойные действия и отдельное подтверждение Discard.
+Automated regressions use real TLS and cover repeated interruptions and restart
+with the same profile key, nested trees/empty directories/zero-byte files,
+persisting and revalidating prefixes, invalid offsets/order/hashes, data before
+consent, Cancel versus Discard, and revoke/unblock without restoring the old epoch.
+Separate storage tests cover authenticated metadata, publication crash states,
+no-replace behavior, record limits, and cleanup. UI tests verify no automatic
+resume, specific consent, offline/legacy/revoked states, repeated reconnects,
+duplicate actions, and separate Discard confirmation.
 
-Полный перечень команд остаётся тем же: Rust tests, Rustfmt, strict Clippy,
-TypeScript, UI tests, Vite и locked Tauri production build. Фактические итоги и
-ссылка на Linux/Windows CI относятся к конкретному коммиту feature-ветки;
-их следует читать отдельно от описанных здесь гарантий и ограничений.
+The full command set remains unchanged: Rust tests, Rustfmt, strict Clippy,
+TypeScript, UI tests, Vite, and a locked Tauri production build. Actual results and
+the Linux/Windows CI link apply to a specific feature-branch commit; read them
+separately from the guarantees and limitations described here.
 
-## Локальная проверка 2026-11-14
+## Local validation on 2026-11-14
 
-CachyOS/Niri: полный набор **121 Rust tests** и **43 UI tests** прошёл без
-failures/ignored; Rustfmt, strict Clippy, обе TypeScript-проверки, Vite production
-build и locked Tauri release build также прошли.
+CachyOS/Niri: the complete **121 Rust tests** and **43 UI tests** passed without
+failures/ignored tests; Rustfmt, strict Clippy, both TypeScript checks, Vite
+production build, and a locked Tauri release build also passed.
 
-Нативный production GUI при 360×420 и отдельный Rust probe-отправитель использовали
-настоящие Secret Service, mDNS и TLS. Папка 256 MiB с вложенным/пустым каталогом и
-нулевым файлом была прервана после подтверждённого checkpoint. Оба процесса
-перезапущены с теми же профилями: сохранились доверенная identity и проверенный
-прогресс. Продолжение потребовало нового checkbox и Accept resume в GUI.
-Проверены целостность итоговых байтов, структура, единственный атомарный receipt,
-удаление checkpoints после CompleteAck и штатное завершение процессов (exit 0).
-Источником управлял Rust probe; GTK chooser не автоматизировался. Тестовые записи
-keyring удалены после завершения сценария.
+The native production GUI at 360×420 and a separate Rust probe sender used real
+Secret Service, mDNS, and TLS. A 256 MiB folder with nested/empty directories and a
+zero-byte file was interrupted after an acknowledged checkpoint. Both processes
+restarted with the same profiles: trusted identity and verified progress persisted.
+Continuation required a new checkbox confirmation and Accept resume in the GUI.
+Checks verified final byte integrity, structure, a single atomic receipt, checkpoint
+removal after CompleteAck, and normal process exit (code 0). The Rust probe
+controlled the source; the GTK chooser was not automated. Test keyring entries
+were removed after the scenario.
 
-Отдельная TLS-регрессия отправителя подтвердила: после обрыва файла 17 MiB
-проверенный префикс 16 MiB не передаётся повторно, по сети идёт только хвост 1 MiB.
-Старые регрессии single-file/folder transfer и sparse-файла >4 GiB сохраняются.
-Windows GUI и два физических устройства остаются отдельными runtime-проверками.
+A separate sender TLS regression confirmed that after interrupting a 17 MiB file,
+the verified 16 MiB prefix is not retransmitted; only the 1 MiB tail crosses the
+network. Existing single-file/folder and >4 GiB sparse-file regressions remain.
+Windows GUI and two physical devices remain separate runtime checks.

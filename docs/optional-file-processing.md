@@ -1,160 +1,164 @@
-# Milestone 2.8 — необязательная обработка файлов
+# Milestone 2.8 — Optional File Processing
 
-## Границы операций
+## Operation boundaries
 
-Передача TLS 1.3, BLAKE3, pairing, trust, checkpoints и сетевой протокол не
-меняются. Обработка выполняется отдельно и только по явному решению пользователя.
-При обнаружении кандидатов OGG после нативного выбора файлов/папки интерфейс
-предлагает **Keep originals** (вариант по умолчанию) или **Convert OGG to MP3**.
-Без решения отправки и конвертации не происходит. При отсутствии OGG прежний
-файловый сценарий продолжается сразу. Никакого автоматического fallback после
-ошибки конвертации нет: оригиналы остаются доступны, их можно выбрать заново.
+TLS 1.3 transfer, BLAKE3, pairing, trust, checkpoints, and the network protocol are
+unchanged. Processing is a separate stage requiring an explicit user decision.
+When OGG candidates are found after native file/folder selection, the UI offers
+**Keep originals** (the default) or **Convert OGG to MP3**. Neither sending nor
+conversion starts without a decision. Without OGG candidates, the existing file
+workflow continues immediately. Conversion errors never cause automatic fallback:
+originals remain available and can be selected again.
 
-Получатель соглашается на фактически подготовленные имена, формат и размер:
-манифест/offer строятся после завершения всей подготовки. Ни один файл из
-незавершённой конвертации не передаётся. Для папки сохраняется относительная
-структура, OGG получают расширение `.mp3`; коллизии имён завершают подготовку
-ошибкой. Другие файлы копируются без изменения содержимого. Оригиналы никогда не
-открываются для записи.
+The receiver approves the actual prepared names, format, and size: the manifest/
+offer is built only after all preparation finishes. No file from an incomplete
+conversion is transferred. Folders retain their relative structure; OGG files get
+the `.mp3` extension, and name collisions fail preparation. Other files are copied
+without content changes. Originals are never opened for writing.
 
-## FFmpeg и установка
+## FFmpeg and installation
 
-FFmpeg **не входит** в executable/CI-артефакт InvarDrop, не скачивается приложением
-и не ищется автоматически в PATH. Для конвертации пользователь выбирает доверенный
-локальный исполняемый файл через **Choose FFmpeg executable**; на Windows это
-`ffmpeg.exe`, не BAT/CMD и не shim/launcher, запускающий другой процесс. Выбор действует до закрытия приложения. На Linux можно
-установить пакет ffmpeg средствами своего дистрибутива и выбрать `/usr/bin/ffmpeg`.
-Для Windows ссылки на варианты сборок приведены на
-[официальной странице загрузки](https://ffmpeg.org/download.html). Нужна сборка с
-OGG/Vorbis, Opus и encoder `libmp3lame`; отсутствие encoder/decoder даёт явную
-ошибку и не приводит к отправке повреждённого результата.
+FFmpeg is **not included** in the InvarDrop executable/CI artifact, downloaded by
+the application, or discovered automatically in PATH. For conversion, the user
+selects a trusted local executable through **Choose FFmpeg executable**. On Windows,
+this must be `ffmpeg.exe`, not BAT/CMD or a shim/launcher that starts another process.
+The selection lasts until the application closes. On Linux, install the ffmpeg
+package through the distribution and select `/usr/bin/ffmpeg`. Windows build options
+are linked from the [official download page](https://ffmpeg.org/download.html).
+The build must support OGG/Vorbis, Opus, and the `libmp3lame` encoder. Missing
+encoders/decoders produce an explicit error and never send a corrupted result.
 
-FFmpeg распространяется под LGPL 2.1+; включение некоторых компонентов меняет
-условия на GPL. Условия конкретной сборки, лицензии библиотек и соответствующие
-исходники необходимо сохранять при её отдельном распространении. InvarDrop не
-линкуется с FFmpeg и не поставляет его бинарники. Основание:
+FFmpeg is distributed under LGPL 2.1+; enabling some components changes the terms
+to GPL. Separate redistribution must retain the specific build's terms, library
+licenses, and corresponding source code. InvarDrop neither links to FFmpeg nor
+ships its binaries. See
 [FFmpeg License and Legal Considerations](https://ffmpeg.org/legal.html).
-Сторонние сборки с `--enable-nonfree` нельзя считать пригодными для
-перераспространения; приложение не делает юридических утверждений о произвольном
-выбранном пользователем executable. Используйте актуальную исправленную сборку.
+Third-party builds using `--enable-nonfree` must not be assumed redistributable;
+the application makes no legal claims about an arbitrary user-selected executable.
+Use a current, patched build.
 
-CI отдельно устанавливает ffmpeg для реальных тестов: Ubuntu apt и Windows
-Chocolatey. Этот тестовый инструмент в артефакт приложения не копируется.
-Локальные Rust-тесты также требуют ffmpeg в PATH или явный
-`INVARDROP_TEST_FFMPEG=/absolute/path/to/ffmpeg`. Эта переменная используется
-тестами, production-конфигурация всегда задаётся нативным выбором.
+CI installs ffmpeg separately for real tests through Ubuntu apt and Windows
+Chocolatey. This test tool is not copied into application artifacts. Local Rust
+tests also require ffmpeg in PATH or an explicit
+`INVARDROP_TEST_FFMPEG=/absolute/path/to/ffmpeg`. This variable is test-only;
+production configuration always uses native selection.
 
-Поддерживаются `.ogg`, `.oga`, `.opus` с OggS/BOS и первым Vorbis/Opus packet.
-Это предварительное распознавание; полный разбор делает FFmpeg. Выход — MP3
-`libmp3lame`, 192 kbit/s, первый audio stream, без видео и автоматического переноса глобальных метаданных.
-Конвертация **с потерями**, качество исходного кодека не восстанавливается.
-После неё MP3 полностью декодируется в null sink с проверкой ошибок; исходник
-потоково хешируется до/после обработки для обнаружения изменения во время чтения.
-Это не filesystem snapshot и не защита от компрометации локальной учётной записи.
+Supported inputs are `.ogg`, `.oga`, and `.opus` with OggS/BOS and an initial
+Vorbis/Opus packet. This is preliminary recognition; FFmpeg performs full parsing.
+Output is MP3 using `libmp3lame`, 192 kbit/s, the first audio stream, no video, and
+no automatic copying of global metadata. Conversion is **lossy** and cannot restore
+the source codec's lost quality. Afterwards, the MP3 is fully decoded to a null sink
+with error checking; the source is hashed in a streaming pass before/after
+processing to detect changes during reading. This is not a filesystem snapshot or
+protection against local-account compromise.
 
-FFmpeg запускается без shell и stdin, с явными аргументами, без сетевых input
-protocols (`file` whitelist). Ошибки отображаются без дампа исходных данных.
-Cancel завершает child и ожидает его остановки. Лимит отдельного запуска — два
-часа, отдельного MP3 — менее 1 GiB, всей подготовленной папки — 2 GiB.
-Промежуточный каталог приватный; до завершения всей подготовки он удаляется при
-ошибке/отмене. Прогресс конвертации — число завершённых OGG, текущий файл показан
-индикатором без выдуманного процента. UI обновляет состояние до двух раз в секунду.
+FFmpeg runs without a shell or stdin, with explicit arguments and no network input
+protocols (`file` whitelist). Errors are displayed without dumping source data.
+Cancel terminates the child and waits for it to stop. Each run is limited to two
+hours, each MP3 to less than 1 GiB, and the entire prepared folder to 2 GiB.
+The intermediate directory is private and is removed on error/cancellation until
+all preparation completes. Conversion progress counts completed OGG files; the
+current file uses an indeterminate indicator without an invented percentage. The
+UI refreshes state at most twice per second.
 
-## Resume подготовленных файлов
+## Resuming prepared files
 
-Готовые копии хранятся в `<profile>/prepared/audio-*/...`. Resume ссылается на
-эти неизменяемые MP3/копии, а не конвертирует OGG повторно. FFmpeg для resume уже
-подготовленной передачи не нужен. Источники и checkpoints повторно проверяются
-как в 2.7; подготовленные байты не модифицируются во время восстановления.
+Prepared copies are stored in `<profile>/prepared/audio-*/...`. Resume references
+these immutable MP3 files/copies instead of converting OGG again. Resuming an
+already prepared transfer does not require FFmpeg. Sources and checkpoints are
+revalidated as in 2.7; prepared bytes remain unchanged during recovery.
 
-На профиль допускается до восьми подготовленных партий. Перед новой конвертацией
-удаляются только партии, на которые больше не ссылаются recovery-записи; active
-source leases тоже учитываются. Пока идёт исходящая передача, очистка откладывается;
-это защищает и legacy-передачи без recovery-записей. Ошибка проверки ссылок запрещает очистку, а не
-разрешает удаление. Если все партии нужны для resume, требуется завершить или
-Discard соответствующие старые передачи. **Dismiss** удаляет только строку UI,
-не исходники и не подготовленные данные, необходимые для resume.
+A profile permits up to eight prepared batches. Before a new conversion, only
+batches no longer referenced by recovery records are removed; active source leases
+are also considered. Cleanup is deferred while an outgoing transfer is active,
+protecting legacy transfers without recovery records too. Failure to validate
+references prevents cleanup rather than authorizing deletion. If every batch is
+needed for resume, complete or Discard the corresponding older transfers.
+**Dismiss** removes only the UI row, never sources or prepared data needed for resume.
 
-Незавершённая конвертация сама не возобновляется: после crash её нужно начать
-заново с новым согласием. При штатном выходе приложение сигнализирует отмену и
-даёт обработчикам до трёх секунд на завершение. При принудительном убийстве
-процесса/зависшем IO возможны остатки или работающий дочерний процесс до его
-завершения; это не считается подготовленной/успешной передачей. После рестарта
-непривязанные временные партии очищаются перед новой конвертацией.
+Incomplete conversion itself is not resumable: after a crash, start it again with
+fresh consent. On normal exit, the application signals cancellation and allows
+workers up to three seconds to finish. Forced termination or stalled I/O may leave
+remnants or a child process running until it finishes; these are never considered
+prepared/successful transfers. After restart, unreferenced temporary batches are
+cleaned up before the next conversion.
 
-## ZIP после получения
+## ZIP extraction after receiving
 
-Только у успешно завершённой **входящей одиночной ZIP-передачи** появляется
-отдельный checkbox и **Extract ZIP**. По умолчанию архив остаётся архивом.
-Распаковка не начинается на Accept transfer, не включается глобальной настройкой
-и не исполняет/открывает извлечённые файлы. Нет автоматической рекурсивной
-распаковки вложенных архивов, сканирования ZIP внутри полученной папки или браузера
-старых receipts. После перезапуска приложения сохранённый ZIP остаётся на диске,
-но история обработки/предложение extraction не восстанавливается.
+Only a successfully completed **incoming single-file ZIP transfer** offers a
+separate checkbox and **Extract ZIP**. Keeping the archive unchanged is the default.
+Extraction never starts on Accept transfer, is not enabled by a global setting,
+and never executes/opens extracted files. There is no automatic recursive
+extraction of nested archives, scanning of ZIP files inside received folders, or
+browser for older receipts. After application restart, the saved ZIP remains on
+disk, but processing history/the extraction offer is not restored.
 
-Разбор выполняется Rust `zip` с выключенными лишними форматами, поддержаны
-обычный ZIP с Stored/Deflate, UTF-8 names. ZIP64, многотомные/зашифрованные архивы
-и другие методы сжатия не поддерживаются. До создания staging проверяются EOCD,
-ограничения центрального каталога, количество и размеры записей, пути и режимы.
+Parsing uses Rust `zip` with unnecessary formats disabled. Ordinary ZIP with
+Stored/Deflate and UTF-8 names is supported. ZIP64, split/encrypted archives, and
+other compression methods are unsupported. EOCD, central-directory limits, entry
+counts/sizes, paths, and modes are checked before staging is created.
 
-| Ограничение | Значение |
+| Limit | Value |
 | --- | --- |
-| Исходный ZIP | 64 MiB |
-| Центральный каталог | 1 MiB |
-| Файлы и каталоги, включая неявных родителей | 4096 |
-| Глубина | 16 компонентов |
-| Компонент / относительный путь | 200 / 1024 байта UTF-8 |
-| Один извлечённый файл | 512 MiB |
-| Суммарные извлечённые данные | 1 GiB |
-| Expansion ratio | до 100:1, с допуском до 1 MiB для маленькой записи |
+| Source ZIP | 64 MiB |
+| Central directory | 1 MiB |
+| Files and directories, including implicit parents | 4096 |
+| Depth | 16 components |
+| Component / relative path | 200 / 1024 UTF-8 bytes |
+| Single extracted file | 512 MiB |
+| Total extracted data | 1 GiB |
+| Expansion ratio | Up to 100:1, with a 1 MiB allowance for a small entry |
 
-Нет `.`/`..`, абсолютных путей, backslash, Windows drive/ADS/device aliases,
-контрольных/bidi-символов и опасных окончаний. Запрещены symlinks, special files,
-несогласованные типы, повторы и case-insensitive коллизии. Предельные значения
-проверяются и по metadata, и по фактически прочитанным данным. CRC проверяется при
-полном чтении; нарушение размеров/CRC останавливает всю операцию.
+`.`/`..`, absolute paths, backslashes, Windows drive/ADS/device aliases, control/
+bidi characters, and unsafe endings are forbidden. Symlinks, special files,
+inconsistent types, duplicates, and case-insensitive collisions are rejected.
+Limits are checked against both metadata and actual bytes read. CRC is checked
+on full reads; size/CRC violations stop the entire operation.
 
-Содержимое записывается чанками 64 KiB с `create_new` в приватный `.extract-*`
-рядом с receipt. Неполное дерево не публикуется. После проверки всех записей оно
-переименовывается no-replace в новый `extracted-*/files`; старые файлы и папки не
-заменяются. До этой границы Cancel удаляет staging; после начала публикации отмена
-уже не выигрывает. Исходный ZIP сохраняется при успехе, ошибке и отмене.
+Contents are written in 64 KiB chunks using `create_new` into a private `.extract-*`
+directory beside the receipt. The incomplete tree is never published. Once all
+entries pass validation, it is renamed with no replacement into a new
+`extracted-*/files` directory; existing files/folders are never replaced. Until
+publication begins, Cancel removes staging; afterwards, cancellation can no longer
+win. The original ZIP is preserved after success, error, or cancellation.
 
-Извлечённые файлы не получают executable bits/архивные ACL. Это не делает контент
-безопасным для последующего ручного запуска: приложение просто никогда его не
-запускает. Unix directory sync применяется к staging; Windows использует свои
-файловые операции. Гарантии при физическом сбое питания и нестандартных сетевых
-FS ограничены контрактами ОС. Распаковка после crash начинается заново с отдельным
-согласием, не является частью сетевого checkpoint.
+Extracted files receive neither executable bits nor archive ACLs. This does not
+make their contents safe for subsequent manual execution: the application simply
+never executes them. Unix directory sync applies to staging; Windows uses its own
+filesystem operations. Power-loss and unusual network-filesystem guarantees are
+limited by OS contracts. After a crash, extraction starts again with separate
+consent; it is not part of the network checkpoint.
 
-## Проверки
+## Validation
 
-Rust-тесты используют настоящую Vorbis/Opus→MP3 конвертацию, декодирование PCM,
-проверку длительности/RMS и неизменности исходника, ошибку FFmpeg и отмену
-работающего child. Проверяются вложенные/пустые ZIP entries, traversal, symlinks,
-коллизии, CRC, bombs, количество/глубина, отмена во время копирования/finalization
-и no-replace collision. Реальный TLS-тест передаёт подготовленную папку с
-несколькими MP3, прерывает её на checkpoint, перезапускает сервис и передаёт
-остаток без повторной конвертации. Прежние pairing/transfer/resume тесты сохранены.
-UI-тесты проверяют отсутствие silent conversion/extraction, default Keep originals,
-дубли действий, отдельное согласие на ZIP и запрет extraction до проверки transfer.
+Rust tests perform real Vorbis/Opus-to-MP3 conversion, PCM decoding, duration/RMS
+checks, source-preservation checks, FFmpeg failure handling, and cancellation of a
+running child. Coverage includes nested/empty ZIP entries, traversal, symlinks,
+collisions, CRC, bombs, entry/depth limits, cancellation during copying/finalization,
+and no-replace collisions. A real TLS test transfers a prepared folder with
+multiple MP3 files, interrupts it at a checkpoint, restarts the service, and sends
+the remainder without converting again. Existing pairing/transfer/resume tests
+are preserved. UI tests check that conversion/extraction never starts silently,
+Keep originals is the default, duplicate actions are prevented, ZIP consent is
+separate, and extraction is prohibited until the transfer is verified.
 
-Windows GUI, интерактивный выбор executable и двух физических устройств требуют
-отдельных ручных испытаний; CI проверяет native build, filesystem и FFmpeg tests.
+Windows GUI, interactive executable selection, and two physical devices require
+separate manual tests; CI checks native builds, filesystem behavior, and FFmpeg tests.
 
-## Фактическая локальная проверка — 2026-11-15
+## Local validation results — 2026-11-15
 
-CachyOS/Niri: **135 Rust tests**, **49 UI tests**, без failures/ignored;
-Rustfmt, Clippy `--all-targets -- -D warnings`, TypeScript и production Vite/Tauri
-build `--no-bundle -- --locked` прошли. Проверена реальная FFmpeg-конвертация,
-декодирование результата, отмена работающего child, неизменность оригиналов и
-хранение подготовленного MP3 до завершения/Discard его resume-записи.
+CachyOS/Niri: **135 Rust tests**, **49 UI tests**, no failures/ignored tests;
+Rustfmt, Clippy `--all-targets -- -D warnings`, TypeScript, and production Vite/Tauri
+builds using `--no-bundle -- --locked` passed. Tests verified real FFmpeg conversion,
+output decoding, cancellation of a running child, unchanged originals, and prepared
+MP3 retention until its resume record completes/is discarded.
 
-Production Linux GUI и Rust probe использовали реальные keyring, discovery и TLS.
-Проверены выключенный Extract до отдельного согласия, успешное извлечение вложенных
-и пустых файлов, неизменность ZIP и отсутствие staging после завершения. Второй
-корректно переданный ZIP с `../outside` отклонён через GUI: исходный архив остался,
-выходных/частичных файлов и записи вне назначения нет. GUI завершился с exit 0;
-тестовые keyring credentials удалены. Нативные GTK file/executable pickers не
-автоматизировались; отправитель выбирался Rust probe, согласие extraction — GUI.
-Результат CI относится к конкретному коммиту feature/optional-file-processing.
+The production Linux GUI and Rust probe used real keyring, discovery, and TLS.
+Checks covered Extract disabled until separate consent, successful extraction of
+nested and empty files, unchanged ZIP contents, and no staging after completion.
+A second correctly transferred ZIP containing `../outside` was rejected through
+the GUI: the original archive remained, with no output/partial files or writes
+outside the destination. The GUI exited with code 0; test keyring credentials were
+removed. Native GTK file/executable pickers were not automated: the Rust probe
+provided the sender, and extraction consent was exercised through the GUI.
+CI results apply to the specific commit on feature/optional-file-processing.

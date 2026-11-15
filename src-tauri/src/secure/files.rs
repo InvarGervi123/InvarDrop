@@ -416,8 +416,8 @@ mod tests {
             "photo.jpg",
             "notes 2026.txt",
             ".config",
-            "данные.bin",
-            "תמונה.png",
+            "\u{434}\u{430}\u{43d}\u{43d}\u{44b}\u{435}.bin",
+            "\u{5ea}\u{5de}\u{5d5}\u{5e0}\u{5d4}.png",
             "COM10.txt",
         ] {
             validate_name(name).unwrap();
