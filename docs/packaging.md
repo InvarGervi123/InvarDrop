@@ -123,7 +123,8 @@ The application-resource map contains only LICENSE and this packaging guide.
 Installer audits inspect payload inventories, executable modes, desktop metadata,
 license files, forbidden development/profile paths and private-key text markers.
 Windows inspection reads MSI tables and extracts archives without running an
-installer; the embedded Microsoft runtime's Authenticode signature must validate.
+installer. A separate Windows filesystem regression covers archive filenames with
+square brackets; hashing and signature checks use literal paths. In the audit, the embedded Microsoft runtime's Authenticode signature must validate.
 Linux CI also exercises real dpkg install/remove on an ephemeral runner with
 profile, received-file and recovery sentinels. These checks do not replace a
 security audit or physical runtime testing.
@@ -164,3 +165,9 @@ empty-file extraction, malicious-path rejection, original-archive preservation,
 and explicit trust revocation. Both exited normally; test credentials were removed.
 No WebKit sandbox override was used. This is packaged-application runtime testing,
 not a claim of a local dpkg installation on CachyOS or Windows installer execution.
+
+The Ubuntu 24.04 CI AppImage from `c79fabe` was also downloaded, checked against
+both the artifact digest and installer SHA-256 manifest, and exercised on the
+native CachyOS desktop with the same GUI/TLS scenario. It exited normally without
+a sandbox override. This additional check does not establish compatibility with
+every Linux distribution or a physical second device.

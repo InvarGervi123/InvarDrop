@@ -1,4 +1,21 @@
+param([switch]$SelfTest)
 $ErrorActionPreference = 'Stop'
+function Get-PackageFileHash([string]$FilePath) {
+    $result = Get-FileHash -LiteralPath $FilePath -Algorithm SHA256
+    if (-not $result -or -not $result.Hash) { throw "Could not hash package file: $FilePath" }
+    return $result.Hash.ToLowerInvariant()
+}
+if ($SelfTest) {
+    $temporary = Join-Path ([IO.Path]::GetTempPath()) ('invardrop-hash-[payload]-' + [guid]::NewGuid() + '.bin')
+    try {
+        $bytes = [byte[]](1, 2, 3, 4, 5)
+        [IO.File]::WriteAllBytes($temporary, $bytes)
+        $expected = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+        if ((Get-PackageFileHash $temporary) -ne $expected) { throw 'Literal archive filename hash regression failed' }
+        Write-Output 'PASS: literal-path hashing of archive filenames containing square brackets'
+    } finally { Remove-Item -LiteralPath $temporary -Force }
+    return
+}
 $root = Split-Path $PSScriptRoot -Parent
 $bundle = Join-Path $root 'src-tauri/target/release/bundle'
 $packages = @(Get-ChildItem "$bundle/nsis/*.exe") + @(Get-ChildItem "$bundle/msi/*.msi")
@@ -29,13 +46,13 @@ foreach ($package in $packages) {
         foreach ($file in $files) {
             $relative = [IO.Path]::GetRelativePath($temporary, $file.FullName)
             if ($relative -match '(?i)(^|[\\/])(?:identity\.enc|profile\.lock|resume-v1|received|prepared|node_modules|src-tauri|\.git|\.aws|\.ssh|\.codex|\.env(?:\..*)?|ffmpeg(?:\.exe)?)([\\/]|$)') { throw "Unexpected package file: $relative" }
-            $inventory[$relative] = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $inventory[$relative] = (Get-PackageFileHash $file.FullName)
         }
         $runtime = @($files | Where-Object { $_.Name -like '*WebView2RuntimeInstaller*.exe' })
         if ($runtime.Count -ne 1) { throw 'Missing or ambiguous offline WebView2 installer' }
-        $signature = Get-AuthenticodeSignature $runtime[0].FullName
+        $signature = Get-AuthenticodeSignature -LiteralPath $runtime[0].FullName
         if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { throw 'WebView2 redistributable signature validation failed' }
-        $details = [ordered]@{ sha256 = (Get-FileHash $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); size = $package.Length; files = $inventory; webviewSignature = 'Valid Microsoft signature' }
+        $details = [ordered]@{ sha256 = (Get-PackageFileHash $package.FullName); size = $package.Length; files = $inventory; webviewSignature = 'Valid Microsoft signature' }
         if ($package.Extension -eq '.msi') {
             $installer = New-Object -ComObject WindowsInstaller.Installer
             $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($package.FullName, 0))
@@ -62,7 +79,7 @@ foreach ($package in $packages) {
             if ($template -match 'DeleteAppDataCheckbox|RmDir[^\r\n]*\$(?:APPDATA|LOCALAPPDATA)') { throw 'Unsafe NSIS user-data deletion found' }
         }
         $report[$package.Name] = $details
-    } finally { Remove-Item $temporary -Recurse -Force }
+    } finally { Remove-Item -LiteralPath $temporary -Recurse -Force }
 }
 $report | ConvertTo-Json -Depth 12 | Set-Content "$bundle/package-audit-windows.json" -Encoding utf8
 ($report.GetEnumerator() | ForEach-Object { "$($_.Value.sha256)  $($_.Key)" }) | Set-Content "$bundle/SHA256SUMS-windows.txt" -Encoding utf8

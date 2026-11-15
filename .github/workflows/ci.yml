@@ -55,6 +55,10 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - name: Test installer safety guards
         run: npm run test:packaging
+      - name: Test Windows archive filename handling
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/verify-windows-packages.ps1 -SelfTest
       - name: Build installation packages
         run: npm run tauri build -- --ci -- --locked
       - name: Lint Rust
