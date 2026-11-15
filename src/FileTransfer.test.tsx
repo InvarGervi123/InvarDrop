@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { FileTransfer, formatBytes, progressPercent } from "./FileTransfer";
+import { FileTransfer, formatBytes, formatEta, progressPercent } from "./FileTransfer";
 import type { SecureConnection } from "./useSecurity";
 afterEach(cleanup);
 const connection = (status = "awaiting_approval", id = "one"): SecureConnection => ({
@@ -150,3 +150,38 @@ it('extracts ZIP only after separate approval following successful receipt',asyn
  fireEvent.click(screen.getByText('I want to extract this ZIP'));fireEvent.click(extract);fireEvent.click(extract);await waitFor(()=>expect(operate).toHaveBeenCalledExactlyOnceWith('processing_extract',{connectionId:'connection',transferId:'one'}));
 });
 it('does not offer ZIP extraction before verification or on the sender',()=>{const c=connection('receiving');c.transfer!.name='archive.zip';const view=render(<FileTransfer connection={c} operate={vi.fn()}/>);expect(screen.queryByText('Extract ZIP')).toBeNull();c.transfer!.status='complete';c.transfer!.direction='outgoing';view.rerender(<FileTransfer connection={c} operate={vi.fn()}/>);expect(screen.queryByText('Extract ZIP')).toBeNull();});
+
+it('does not reuse ZIP extraction consent for a new receipt', async () => {
+  const c = connection('complete'); c.transfer!.name = 'archive.zip'; const operate = vi.fn().mockResolvedValue(true);
+  const view = render(<FileTransfer connection={c} operate={operate} />);
+  fireEvent.click(screen.getByText('I want to extract this ZIP'));
+  view.rerender(<FileTransfer connection={{ ...c, transfer: { ...c.transfer!, id: 'new-receipt' } }} operate={operate} />);
+  expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false);
+  fireEvent.click(screen.getByText('Extract ZIP')); expect(operate).not.toHaveBeenCalled();
+});
+it('recovers from a rejected extraction command without losing the archive or throwing', async () => {
+  const c = connection('complete'); c.transfer!.name = 'archive.zip'; c.transfer!.path = '/received/archive.zip';
+  const operate = vi.fn().mockRejectedValueOnce(new Error('IPC failed')).mockResolvedValue(true);
+  render(<FileTransfer connection={c} operate={operate} />); fireEvent.click(screen.getByText('I want to extract this ZIP'));
+  fireEvent.click(screen.getByText('Extract ZIP')); await waitFor(() => expect(screen.getByText('Extract ZIP')).toBeTruthy());
+  expect(screen.getByText('/received/archive.zip')).toBeTruthy(); fireEvent.click(screen.getByText('Extract ZIP'));
+  await waitFor(() => expect(operate).toHaveBeenCalledTimes(2));
+});
+it('announces measured progress accessibly without marking the byte counter as live', () => {
+  const c = connection('receiving'); c.transfer!.transferred = 768;
+  render(<FileTransfer connection={c} operate={vi.fn()} />);
+  expect(screen.getByRole('progressbar').getAttribute('aria-valuetext')).toBe('50% · 768 B of 1.5 KiB');
+  expect(screen.getAllByRole('status')).toHaveLength(1);
+});
+
+it("formats ETA in useful units without inventing a value", () => {
+  expect(formatEta(4)).toBe("4 s"); expect(formatEta(90)).toBe("1 min 30 s");
+  expect(formatEta(3660)).toBe("1 h 1 min"); expect(formatEta(NaN)).toBe("");
+  expect(formatEta(-1)).toBe("");
+});
+it("hides stale speed and ETA after a transfer has finished", () => {
+  const c = connection("complete"); c.transfer!.bytesPerSecond = 2 * 1024 ** 2; c.transfer!.etaSeconds = 90;
+  render(<FileTransfer connection={c} operate={vi.fn()} />);
+  expect(screen.queryByText(/ETA/)).toBeNull(); expect(screen.queryByText(/2.00 MiB/)).toBeNull();
+  expect(screen.getByText("Speed —")).toBeTruthy();
+});
