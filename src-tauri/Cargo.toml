@@ -19,6 +19,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+zip = { version = "=9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 blake3 = "1"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 ring = "0.17"

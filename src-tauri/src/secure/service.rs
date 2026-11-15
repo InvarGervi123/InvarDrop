@@ -361,6 +361,45 @@ impl Service {
             Ok(())
         })
     }
+    pub(crate) async fn cleanup_prepared(&self) -> std::result::Result<(), String> {
+        let catalog = get_catalog(&self.shared).map_err(|e| e.to_string())?;
+        let root = self
+            .shared
+            .receive_directory
+            .parent()
+            .ok_or("Invalid profile")?
+            .join("prepared");
+        tokio::task::spawn_blocking(move || -> std::result::Result<(), String> {
+            let paths = catalog
+                .prepared_references()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(std::fs::canonicalize)
+                .collect::<std::io::Result<Vec<_>>>()
+                .map_err(|_| "Cannot verify prepared source references; keep existing copies")?;
+            if !root.exists() {
+                return Ok(());
+            }
+            for entry in std::fs::read_dir(&root)
+                .map_err(|_| "Prepared storage unavailable")?
+                .take(64)
+            {
+                let entry = entry.map_err(|_| "Prepared storage unavailable")?;
+                let path = entry.path();
+                if entry.file_name().to_string_lossy().starts_with("audio-")
+                    && super::bundle::regular_metadata(&path).is_ok_and(|m| m.is_dir())
+                    && !paths
+                        .iter()
+                        .any(|p| path.canonicalize().is_ok_and(|root| p.starts_with(root)))
+                {
+                    std::fs::remove_dir_all(path).map_err(|_| "Prepared cleanup failed")?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| "Prepared cleanup failed")?
+    }
     pub async fn send_resumable_file(&self, id: &str, path: &std::path::Path) -> Result<()> {
         let source = Source::open(path).await?;
         let tree = Manifest {

@@ -6,7 +6,7 @@ discovery has been exercised locally on CachyOS.
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Current status — milestone 2.7 (feature branch)
+## Current status — milestone 2.8 (feature branch)
 
 Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
 appear and disappear in the React UI without refresh. Each run advertises a
@@ -214,3 +214,7 @@ same process/window, using matching GTK and desktop preferences. Original deskto
 settings were restored afterward. Both palettes fit at 360 × 420; text/background
 contrast is at least 5.97:1 for all text color pairs. Windows runtime testing is
 still pending; no claim of a local Windows test is made.
+
+Optional OGG-to-MP3 preparation and post-transfer ZIP extraction require separate
+explicit approval. FFmpeg is optional, selected locally, and not bundled.
+See [processing dependencies, security limits and tests (Russian)](docs/optional-file-processing.md).

@@ -34,7 +34,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev patchelf ffmpeg
+      - name: Install optional audio test dependency
+        if: runner.os == 'Windows'
+        run: |
+          choco install ffmpeg --yes --no-progress
+          $audioBinary = Get-ChildItem "$env:ChocolateyInstall\lib\ffmpeg" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $audioBinary) { throw "FFmpeg binary not found" }
+          "INVARDROP_TEST_FFMPEG=$($audioBinary.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Set up Rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
