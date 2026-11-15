@@ -1,4 +1,4 @@
-# Milestone 3.1 — Cross-device testing and reliability
+# Milestone 3.1 — Cross-device testing and reliability (Step 13)
 
 ## Scope and isolation
 
@@ -73,7 +73,7 @@ multiple cases; scenario rows are not additional test counts.
 
 | Scenario | Verified result |
 | --- | --- |
-| Independent identities and bidirectional transfers | Different identities and ports; explicit two-sided pairing; zero bytes, small payloads, a 70-chunk payload, and accented/CJK filenames transferred both ways; destination contents checked with streaming BLAKE3 and byte length. |
+| Independent identities and bidirectional transfers | Different identities and ports; explicit two-sided pairing; zero bytes, small payloads, a 70-chunk payload, and accented/CJK filenames transferred both ways. The reverse transfer reads the receiver-owned receipt. Destination filenames, streaming BLAKE3 hashes and byte lengths are checked. |
 | Folder and multi-selection | Nested paths, empty directory, zero-byte file, and two selected files; preserved structure and contents. |
 | Untrusted and repeated pairing attempts | Sending while quarantined fails; two rejected pairing attempts create no trust; stale approval IDs and acceptance after decline fail; inbox stays empty. |
 | Two abrupt file interruptions | A 33 MiB + 4 byte file survives two receiver kills and restarts of both processes; 16/32 MiB verified checkpoints persist; peer identities/trust persist; reconnect alone does not start receiving; each resume requires explicit approval; final contents match. |
@@ -129,9 +129,32 @@ was stopped because the execution sandbox denied opening a TCP listener; the
 network-capable run passed. This is an execution constraint, not an application
 TLS or trust bypass. No backend protocol, processing policy, or UI was redesigned.
 
-Native matrix results for this branch will be recorded after the pushed checks
-complete. Windows GUI, installer runtime, physical Windows devices and physical
-Linux-to-Windows transfer are not claimed. Installer formats and runtime
+Native matrix results for `bfdefc4`:
+[successful Linux and Windows CI](https://github.com/InvarGervi123/InvarDrop/actions/runs/43707565251).
+
+| Runner | Rust | UI | Installer guards | Native production packages |
+| --- | --- | --- | --- | --- |
+| Ubuntu 24.04 | **147 passed** | **77 passed** | **4 passed** | AppImage / `.deb` built and audited; actual dpkg install/remove preserved profile sentinels |
+| Windows Server 2022 | **140 passed** | **77 passed** | **4 passed**, plus **1** PowerShell literal-path regression | NSIS / MSI built and inspected; Microsoft WebView2 signature validated |
+
+Both jobs passed TypeScript, Rustfmt and strict Clippy, and uploaded testing
+artifacts without publishing a release. All **11** independent-process scenarios
+executed successfully on each native OS, including actual Windows child `.exe`
+processes, loopback TLS, cancellation and restart recovery. No Rust test failed
+or was ignored. Seven existing Unix-only tests account for the count difference:
+three symlink/source/staging cases, private profile permissions, injected Linux
+ENOSPC, and two >4 GiB sparse streaming tests (one over TLS). Windows CI does not
+claim those Unix-only cases or >4 GiB streaming execution.
+
+The follow-up commit strengthens the already passing round-trip case to send
+back the receiver-owned receipt and assert Unicode destination names explicitly;
+its local full suite again passed **147** tests. Consult the
+[branch checks](https://github.com/InvarGervi123/InvarDrop/actions?query=branch%3Afeature%2Fcross-device-testing)
+for the latest commit's native matrix status. Recorded run IDs identify the
+tested revision rather than implying that future branch commits are validated.
+
+Windows GUI, installer runtime, Credential Manager, physical Windows devices and
+physical Linux-to-Windows transfer are not claimed. Installer formats and runtime
 limitations remain documented in [packaging.md](packaging.md).
 
 ## Future physical Linux-to-Windows testing
@@ -173,8 +196,13 @@ One physical CachyOS machine is available. Independent processes on one host and
 native Linux/Windows CI do not establish full cross-platform compatibility.
 Physical Linux-to-Windows transfers, Windows GUI/installer execution, Windows
 firewall prompts, separate-machine discovery, Wi-Fi isolation, VPN/routing,
-suspend/resume, slow/lossy WAN-like links, power loss, and disk-full/permission
-fault injection still require additional testing. Forced process death and TCP
+suspend/resume, slow/lossy WAN-like links, power loss, and device/process-level
+disk-full/permission fault injection still require additional testing. The
+existing Linux ENOSPC regression is a storage-unit fault injection, not a full
+device filesystem-exhaustion test. Directory metadata synchronization is
+Unix-specific; Windows uses the existing user-profile ACLs and filesystem
+publication guarantees described in [resumable-transfers.md](resumable-transfers.md).
+Forced process death and TCP
 closure reproduce important interruption paths without emulating packet loss,
 link shaping, or all real network timing conditions. No QR pairing, mobile
 browser transfer, Android support, resume protocol redesign, or dependency was

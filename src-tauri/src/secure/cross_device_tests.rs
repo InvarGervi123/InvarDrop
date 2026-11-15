@@ -454,10 +454,13 @@ fn independent_devices_and_bidirectional_contents() {
         );
         accept(&mut b, &bc, &request);
         let path = finish(&mut a, &mut b, &ac, &bc);
+        assert_eq!(path.file_name(), source.file_name());
         same_file(&source, &path);
-        let request = offer(&mut b, &mut a, &bc, &ac, &source);
+        // Send back the receiver-owned receipt, not the shared source fixture.
+        let request = offer(&mut b, &mut a, &bc, &ac, &path);
         accept(&mut a, &ac, &request);
         let path = finish(&mut b, &mut a, &bc, &ac);
+        assert_eq!(path.file_name(), source.file_name());
         same_file(&source, &path);
     }
     let tree = root.join("Nested");
