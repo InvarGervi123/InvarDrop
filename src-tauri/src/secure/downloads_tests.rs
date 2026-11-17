@@ -31,7 +31,18 @@ fn duplicate_names_are_isolated_and_retries_do_not_overwrite() {
     assert_ne!(a, b);
     assert_eq!(fs::read(&a).unwrap(), bytes);
     assert_eq!(fs::read(&b).unwrap(), bytes);
-    assert!(a.starts_with(downloads.join("InvarDrop")));
+    // Windows canonicalization uses an extended-length prefix. Compare the
+    // exact destination against the same canonical system root, without
+    // stripping prefixes or relaxing containment checks.
+    assert_eq!(
+        a,
+        downloads
+            .canonicalize()
+            .unwrap()
+            .join("InvarDrop")
+            .join(format!("received-{first}"))
+            .join("photo.png")
+    );
     assert_eq!(desktop(&downloads, &first, &source, &manifest).unwrap(), a);
     fs::write(&a, b"user changed this file").unwrap();
     assert!(desktop(&downloads, &first, &source, &manifest).is_err());

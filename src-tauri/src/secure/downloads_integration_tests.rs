@@ -35,7 +35,15 @@ async fn downloads_require_approval_and_duplicate_names_preserve_both_files() {
         let received = file_status(&b, &bc.id, "complete").await;
         file_status(&a, &ac.id, "complete").await;
         let public = PathBuf::from(received.download_path.unwrap());
-        assert!(public.starts_with(downloads.join("InvarDrop")));
+        assert_eq!(
+            public,
+            downloads
+                .canonicalize()
+                .unwrap()
+                .join("InvarDrop")
+                .join(format!("received-{}", offer.id))
+                .join(&offer.name)
+        );
         assert_eq!(std::fs::read(&public).unwrap(), bytes);
         assert_eq!(std::fs::read(received.path.unwrap()).unwrap(), bytes);
         paths.push(public);

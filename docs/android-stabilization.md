@@ -144,3 +144,23 @@ SHA-256: `2d7698ebf41e7bd25d2ea112a212601511e5433a94c19f5763f524c098cc8060`.
 8. After authorized commit/push, require current Linux/Windows CI before merging
    or publishing a release. Record device outcomes and unresolved limitations
    without representing prior CI as verification of the current work.
+
+
+## Windows CI follow-up
+
+Run [44049872032](https://github.com/InvarGervi123/InvarDrop/actions/runs/44049872032)
+passed Linux but exposed three Windows Rust failures. Two Downloads assertions
+compared canonical extended-length Windows paths with noncanonical roots.
+The tests now compare the exact expected receipt against a canonical root;
+production path handling and no-overwrite checks stay unchanged.
+
+The occupied-port failure also exposed missing exclusive Winsock binding.
+Listeners now set `SO_EXCLUSIVEADDRUSE` before bind for both dual-stack and
+IPv4 fallback sockets. Regressions keep the original occupied-port assertion,
+check an occupied IPv4 port against both listener paths, and reject a competing
+Windows `SO_REUSEADDR` bind. None of the three failing tests is disabled, and
+TLS/pairing are unchanged.
+See the fix commit's Linux and Windows checks for validation results.
+
+References: [Rust canonicalize](https://doc.rust-lang.org/std/fs/fn.canonicalize.html),
+[Winsock exclusive binding](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse).

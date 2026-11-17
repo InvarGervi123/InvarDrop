@@ -98,6 +98,38 @@ mod tests {
         assert!(matches!(listener_socket(port), Err(Error::ListenBind)));
     }
     #[test]
+    fn occupied_ipv4_port_blocks_dual_stack_and_ipv4_fallback() {
+        let listener = listener_socket_for(socket2::Domain::IPV4, 0).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(listener_socket_for(socket2::Domain::IPV4, port).is_err());
+        assert!(matches!(listener_socket(port), Err(Error::ListenBind)));
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn exclusive_listener_rejects_reuseaddr_port_hijacking() {
+        use socket2::{Domain, Protocol, Socket, Type};
+        // Exercise the explicit IPv4 path and the normal dual-stack/fallback
+        // path without requiring IPv6 to be enabled on every Windows host.
+        for listener in [
+            listener_socket_for(Domain::IPV4, 0).unwrap(),
+            listener_socket(0).unwrap(),
+        ] {
+            let port = listener.local_addr().unwrap().port();
+            let competing = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+            competing.set_reuse_address(true).unwrap();
+            let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+            let error = competing.bind(&address.into()).unwrap_err();
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+                ),
+                "An exclusive listener must reject a competing IPv4 bind: {error}"
+            );
+        }
+    }
+    #[test]
     fn tcp_failures_are_distinct_and_mixed_failures_retain_actionable_cause() {
         let mut failures = Failures::default();
         assert_eq!(failures.error(), Error::TcpConnect);

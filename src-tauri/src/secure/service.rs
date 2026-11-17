@@ -758,23 +758,56 @@ fn refresh_trust(s: &Shared) -> Result<()> {
         Ok(())
     })
 }
-fn listener_socket(port: u16) -> Result<std::net::TcpListener> {
+fn listener_socket_for(
+    domain: socket2::Domain,
+    port: u16,
+) -> std::io::Result<std::net::TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};
-    let v6 = (|| -> std::io::Result<_> {
-        let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            SO_EXCLUSIVEADDRUSE, SOCKET_ERROR, SOL_SOCKET, WSAGetLastError, setsockopt,
+        };
+        // Winsock defaults do not reserve wildcard/dual-stack ports exclusively.
+        // Apply before bind on both families, including the IPv4 fallback.
+        let enabled: i32 = 1;
+        // SAFETY: the socket is live, and optval points to a valid i32 for this call.
+        if unsafe {
+            setsockopt(
+                socket.as_raw_socket() as _,
+                SOL_SOCKET,
+                SO_EXCLUSIVEADDRUSE,
+                (&enabled as *const i32).cast(),
+                std::mem::size_of_val(&enabled) as _,
+            )
+        } == SOCKET_ERROR
+        {
+            // SAFETY: retrieve this thread's Winsock error immediately after failure.
+            return Err(std::io::Error::from_raw_os_error(unsafe {
+                WSAGetLastError()
+            }));
+        }
+    }
+    let address = if domain == Domain::IPV6 {
         socket.set_only_v6(false)?;
-        socket.set_nonblocking(true)?;
-        socket.bind(&SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
-        socket.listen(64)?;
-        Ok(socket.into())
-    })();
-    v6.or_else(|_| {
-        let l = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
-        l.set_nonblocking(true)?;
-        Ok(l)
-    })
-    .map_err(|_: std::io::Error| Error::ListenBind)
+        SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port))
+    } else {
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
+    };
+    socket.set_nonblocking(true)?;
+    socket.bind(&address.into())?;
+    socket.listen(64)?;
+    Ok(socket.into())
 }
+fn listener_socket(port: u16) -> Result<std::net::TcpListener> {
+    use socket2::Domain;
+    listener_socket_for(Domain::IPV6, port)
+        .or_else(|_| listener_socket_for(Domain::IPV4, port))
+        .map_err(|_| Error::ListenBind)
+}
+
 async fn listen(s: Arc<Shared>, store: SharedStore) -> Result<()> {
     let mut stop = s.stop.subscribe();
     #[cfg(target_os = "android")]
