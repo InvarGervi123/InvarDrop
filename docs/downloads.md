@@ -108,8 +108,10 @@ stays private and is never exported.
 - UI tests verify public destination display while keeping the private ZIP
   processing source, plus existing acceptance/cancellation/error interactions.
 
-Host tests and compilation do not establish Android MediaStore/filesystem
-runtime behavior or Windows installation/runtime compatibility. The Windows API
-binding calls were type-checked on Linux, not executed on Windows. Native Windows
-DACL behavior, physical Android Downloads visibility, system file managers and
-cross-device transfers require their respective runtime checks.
+Native Windows Downloads and loopback TLS regressions now pass in CI. Basic
+Android/Linux transfers and Downloads saving on a Galaxy S25 are user-confirmed.
+These results do not establish Windows GUI/installer behavior, all Android
+MediaStore failure cases or background reliability. See the
+[current verification record and remaining device checks](android-stabilization.md)
+for commit-specific CI evidence and the distinction between automated and
+physical-device coverage.

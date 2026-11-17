@@ -24,11 +24,11 @@ Connection shutdown propagated the same failure to both `Connection.error` and
 `TransferView.error`, and both cards rendered it. The connection card now omits
 an error already rendered by the transfer card, while retaining distinct errors.
 
-ADB had no connected device during implementation. The system-alias regression
-and code review establish the incompatibility, but the failing syscall/path on
-the Galaxy and successful receiving after the fix still require device logs and
-runtime verification. The existing trusted TLS connection was reported working
-by the user; it was not re-tested on the phone in this session.
+ADB had no connected device during the initial implementation. The system-alias
+regression and code review establish the incompatibility; the original failing
+syscall/path was not captured on the Galaxy. The user subsequently confirmed
+successful transfers in both directions and Downloads saving; see the
+[current verification record](android-stabilization.md).
 
 ## Sender selection through SAF
 
@@ -92,14 +92,8 @@ copy and have no separate import-progress/cancel control; cancel the picker to
 stop before importing. A stalled provider read may require closing the app;
 unverified imports are never offered as completed transfers.
 
-For physical verification, update using `adb install -r` with the same debug
-signing key; never uninstall, clear data or reset trust. Send a PNG in both
-directions, explicitly approve each offer, compare BLAKE3 hashes, reconnect after
-a deliberate interruption and verify that resume asks for approval again.
-Successful host/JVM checks and APK compilation do not prove Android GUI/provider
-or filesystem runtime behavior.
-
-
-For the later user-reported basic Galaxy transfers, the current Android 17
-permission fix, and the distinction between host automation and physical-device
-coverage, see [Milestone 15 verification](android-stabilization.md).
+The [Milestone 15 follow-up checklist](android-stabilization.md#follow-up-validation-before-broader-compatibility-claims)
+tracks remaining physical restart, interruption, permission and background
+checks. Preserve app data and the signing key when updating; never uninstall,
+clear data or reset trust. Confirmed basic transfers need not be repeated for
+session handoff. Host/JVM checks do not prove untested Android provider behavior.

@@ -19,6 +19,9 @@ Linux x86_64: AppImage / Debian; Windows x86_64: NSIS / MSI. This is a testing
 prerelease, not a production-readiness or full cross-platform compatibility claim.
 The installers are unsigned; do not bypass platform security warnings.
 
+The published Beta predates Android support and the latest Downloads changes.
+Android ARM64 currently uses a development/debug APK, not a public release.
+
 Milestone 3.1 is merged through PR #15. See
 [cross-device testing coverage](docs/cross-device-testing.md),
 [packaging details](docs/packaging.md), and [UI/UX validation](docs/ui-ux-polish.md).

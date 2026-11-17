@@ -2,20 +2,21 @@
 
 ## Status and evidence
 
-The core Android implementation is ready for commit preparation. On 2026-11-17,
-the user confirmed that Android/Linux transfers work in both directions,
-including automatic Downloads saving. These manual checks are user-reported;
-they were not repeated during commit preparation.
+The Android milestone (`c565862`) and Windows follow-up (`5b3883e`) are committed
+and pushed to `main`. Linux and Windows CI passed on `5b3883e`; see the
+[Windows CI follow-up](#windows-ci-follow-up) for exact results and root causes.
+No new release was created.
 
-The automated evidence below was collected on 2026-11-16. Advanced Galaxy
-workflows and Windows CI for the current uncommitted work remain separate
-validation limitations, not unfinished basic-transfer implementation. Preparing
-this commit does not certify background reliability or a new public release.
+On 2026-11-17, the user confirmed that Android/Linux transfers work in both
+directions, including automatic Downloads saving. These manual checks are
+user-reported and must not be repeated merely for session handoff. The focused
+automated evidence below was collected on 2026-11-16. Advanced Galaxy workflows
+remain follow-up validation; background reliability is not certified.
 
-ADB initially detected `SM-S931B`, API 37, a 4096-byte runtime page size, and a
-running debug InvarDrop WebView. It then disconnected before transfer tests could
-start and remained unavailable. No new physical transfer, restart, background or
-permission-dialog success is claimed. No APK was installed, app data cleared,
+During that automated verification session, ADB initially detected `SM-S931B`,
+API 37, a 4096-byte runtime page size, and a running debug InvarDrop WebView.
+It disconnected before transfer tests could start. No new physical transfer,
+restart, background or permission-dialog success is claimed. No APK was installed, app data cleared,
 identity reset, permission auto-granted or trust entry removed.
 
 ## Actual automated results
@@ -92,11 +93,11 @@ Reference: [Android local network permission](https://developer.android.com/priv
 - Private/public copies need additional space. Existing transfer/count/depth,
   checkpoint-age and finalization time limits remain. See [Downloads saving](downloads.md)
   for cross-volume staging, hard-crash leftovers and slow finalization limits.
-- The permission change is Android-only. Shared Linux tests and static checks
-  pass. No physical Windows machine or current Windows CI run was used; the
-  uncommitted work has not been pushed. Prior successful CI cannot certify the
-  current Android/Downloads changes. Windows known-folder/DACL behavior still
-  needs native CI/runtime validation.
+- Native Linux and Windows CI now pass, including isolated Downloads and TLS
+  regressions. No physical Windows GUI, installer installation/removal, firewall,
+  normal Credential Manager usage or physical Linux-to-Windows transfer is
+  verified by those tests. See [cross-device testing](cross-device-testing.md)
+  for the future physical Windows checklist.
 
 Reference: [Android Doze and App Standby](https://developer.android.com/training/monitoring-device-state/doze-standby).
 
@@ -114,6 +115,9 @@ Path: `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal
 
 SHA-256: `2d7698ebf41e7bd25d2ea112a212601511e5433a94c19f5763f524c098cc8060`.
 
+This ignored local artifact predates the Windows follow-up commit; it was not
+rebuilt for that fix and is not a published release or an exact `5b3883e` build.
+
 ## Follow-up validation before broader compatibility claims
 
 1. Record the public device fingerprint and trusted peer list. Update with the
@@ -124,8 +128,7 @@ SHA-256: `2d7698ebf41e7bd25d2ea112a212601511e5433a94c19f5763f524c098cc8060`.
    pairing or file request. Preserve the fingerprint/trust list across restart.
 3. Record whether the existing manual device checks also covered 100 MB and
    1 GB files. The host large-file results above are not Android benchmarks.
-   Do not repeat confirmed basic transfers or Downloads saving just to prepare
-   the commit. Additional device stress checks are follow-up validation.
+   Additional device stress checks are follow-up validation.
 4. Interrupt after a verified checkpoint by disconnecting a test connection or
    closing one app. Reopen/reconnect, confirm fresh resume approval and verified
    byte progress, and compare final contents. Repeat cancellation from each side;
@@ -141,10 +144,9 @@ SHA-256: `2d7698ebf41e7bd25d2ea112a212601511e5433a94c19f5763f524c098cc8060`.
 7. Check insufficient-space/permission errors without filling the real device.
    Verified private data must remain recoverable and pending/public state must
    be truthful. Do not delete profile files or Keystore material to induce errors.
-8. After authorized commit/push, require current Linux/Windows CI before merging
-   or publishing a release. Record device outcomes and unresolved limitations
-   without representing prior CI as verification of the current work.
-
+8. Record new device outcomes with the tested APK hash and preserve unresolved
+   limitations. Any further source changes need appropriate fresh checks;
+   publishing a release requires explicit user authorization.
 
 ## Windows CI follow-up
 
@@ -160,7 +162,14 @@ IPv4 fallback sockets. Regressions keep the original occupied-port assertion,
 check an occupied IPv4 port against both listener paths, and reject a competing
 Windows `SO_REUSEADDR` bind. None of the three failing tests is disabled, and
 TLS/pairing are unchanged.
-See the fix commit's Linux and Windows checks for validation results.
+
+Fix commit `5b3883e` passed
+[run 44055447070](https://github.com/InvarGervi123/InvarDrop/actions/runs/44055447070):
+Ubuntu 24.04 **177 Rust tests passed, 0 failed, 1 opt-in large-file test ignored**;
+Windows Server 2022 **165 passed, 0 failed, 0 ignored**. All three original
+failures and the new bind regressions passed. Both jobs also passed UI tests,
+TypeScript, Rustfmt, strict Clippy, production packaging and package checks.
+These desktop jobs do not execute Android Keystore, SAF or MediaStore.
 
 References: [Rust canonicalize](https://doc.rust-lang.org/std/fs/fn.canonicalize.html),
 [Winsock exclusive binding](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse).
