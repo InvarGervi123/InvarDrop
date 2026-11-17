@@ -39,6 +39,15 @@ pub(super) async fn start_with_master(root: &Path, duration: Duration, master: &
     start_observed(root, duration, master, Arc::new(|_| {})).await
 }
 async fn start_observed(root: &Path, duration: Duration, master: &[u8], notify: Notify) -> Service {
+    start_with_destination(root, duration, master, notify, None).await
+}
+async fn start_with_destination(
+    root: &Path,
+    duration: Duration,
+    master: &[u8],
+    notify: Notify,
+    downloads: Option<super::super::downloads::Destination>,
+) -> Service {
     let store = Store::for_test(root, master).unwrap();
     let mut shared = make_shared(
         Arc::new(AtomicU16::new(0)),
@@ -47,6 +56,7 @@ async fn start_observed(root: &Path, duration: Duration, master: &[u8], notify: 
         root.join("received"),
     );
     Arc::get_mut(&mut shared).unwrap().file_approval_duration = duration;
+    Arc::get_mut(&mut shared).unwrap().downloads = downloads;
     let s = shared.clone();
     let task = tokio::spawn(async move {
         listen(s, Arc::new(Mutex::new(store))).await.unwrap();
@@ -2042,3 +2052,10 @@ mod resume_actor_regressions;
 
 #[path = "processing_tests.rs"]
 mod processing_regressions;
+
+#[path = "downloads_integration_tests.rs"]
+mod downloads_regressions;
+
+#[cfg(unix)]
+#[path = "large_transfer_tests.rs"]
+mod large_transfer_regressions;

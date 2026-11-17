@@ -250,7 +250,7 @@ fn regular_file(path: &Path, write: bool) -> Result<File> {
     }
     let mut options = OpenOptions::new();
     options.read(true).write(write);
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
@@ -319,6 +319,20 @@ fn full_hash_checked(path: &Path, size: u64, gate: Option<&CommitGate>) -> Resul
     }
     Ok(hash)
 }
+// Android's OS-owned /data/user/0 alias may be a symlink. Resolve that
+// trusted profile prefix once; never canonicalize peer-controlled descendants.
+#[cfg(any(target_os = "android", all(test, unix)))]
+fn android_profile(root: &Path) -> Result<PathBuf> {
+    if !bundle::regular_metadata(root)?.is_dir() {
+        return Err(Error::Storage);
+    }
+    let canonical = root.canonicalize().map_err(|_| Error::Storage)?;
+    #[cfg(target_os = "android")]
+    if canonical != root {
+        eprintln!("Android transfer storage: resolved application profile alias");
+    }
+    Ok(canonical)
+}
 impl Catalog {
     pub(crate) fn prepared_references(&self) -> Result<Vec<PathBuf>> {
         let _guard = lock(&self.mutex);
@@ -343,6 +357,8 @@ impl Catalog {
         if !root.is_absolute() {
             return Err(Error::Storage);
         }
+        #[cfg(target_os = "android")]
+        let root = android_profile(&root)?;
         let catalog = Self {
             root: root.join("resume-v1"),
             inbox: root.join("received"),
@@ -1359,6 +1375,47 @@ mod tests {
                 _ => panic!("Expected a partial checkpoint"),
             }
         }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn android_profile_alias_receives_without_accepting_payload_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let peer = peer();
+        let (send, _) = setup(&dir.path().join("sender"), &peer);
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let alias = dir.path().join("user-zero");
+        symlink(&real, &alias).unwrap();
+        let profile = alias.join("profile");
+        let (old, store) = setup(&profile, &peer);
+        let source = dir.path().join("image.png");
+        fs::write(&source, b"verified image bytes").unwrap();
+        let ticket = send
+            .prepare(&peer, &tree("image.png", 20), vec![source.clone()], false)
+            .unwrap();
+        assert!(matches!(
+            old.accept(&peer, &ticket.id, ticket.manifest.clone()),
+            Err(Error::FileIo)
+        ));
+        let root = android_profile(&profile).unwrap();
+        let receive = Catalog::new(root.clone(), store).unwrap();
+        let mut receiver = receive
+            .accept(&peer, &ticket.id, ticket.manifest.clone())
+            .unwrap();
+        let mut sender = send.sender(&peer, &ticket.id, receiver.position()).unwrap();
+        finish(&mut sender, &mut receiver);
+        drop(sender);
+        let destination = receiver
+            .finish(Arc::new(CommitGate::default()), || {})
+            .unwrap();
+        assert_eq!(fs::read(destination).unwrap(), fs::read(source).unwrap());
+        let link = root.join("injected");
+        symlink(dir.path().join("sender"), &link).unwrap();
+        assert!(android_profile(&link).is_err());
+        let unsafe_file = root.join("unsafe");
+        symlink(dir.path().join("image.png"), &unsafe_file).unwrap();
+        assert!(regular_file(&unsafe_file, true).is_err());
     }
     #[test]
     fn single_file_survives_restart_and_does_not_resend_verified_prefix() {

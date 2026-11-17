@@ -121,7 +121,7 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
         <button type="button" disabled={extractConfirmed !== extractionKey || extracted === extractionKey} onClick={() => void extract()}>{extracted === extractionKey ? "Extraction requested" : "Extract ZIP"}</button>
         {extracted === extractionKey && <p className="file-hint">Check File preparation &amp; extraction below for the result. Your original ZIP is kept.</p>}
       </div>}
-      {transfer.path && <p className="saved-path">Saved to: <span dir="auto">{transfer.path}</span></p>}
+      {(transfer.downloadPath || transfer.path) && <p className="saved-path">Saved to: <span dir="auto">{transfer.downloadPath || transfer.path}</span></p>}
       {transfer.error && transfer.status !== "expired" && <ErrorNotice message={transfer.error} />}
     </section>}
   </div>;

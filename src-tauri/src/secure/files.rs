@@ -150,7 +150,7 @@ impl Source {
         }
         let mut options = tokio::fs::OpenOptions::new();
         options.read(true);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         options.custom_flags(libc::O_NOFOLLOW);
         #[cfg(windows)]
         options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
@@ -265,6 +265,9 @@ impl Sink {
             received: 0,
             hasher: blake3::Hasher::new(),
         })
+    }
+    pub(crate) fn receipt_metadata(&self) -> (&str, u64) {
+        (&self.name, self.size)
     }
     pub async fn write(&mut self, chunk: &[u8]) -> Result<()> {
         if chunk.is_empty() || chunk.len() > CHUNK_SIZE {

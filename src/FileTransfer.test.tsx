@@ -185,3 +185,14 @@ it("hides stale speed and ETA after a transfer has finished", () => {
   expect(screen.queryByText(/ETA/)).toBeNull(); expect(screen.queryByText(/2.00 MiB/)).toBeNull();
   expect(screen.getByText("Speed —")).toBeTruthy();
 });
+
+it("shows the public Downloads destination while preserving the private ZIP processing path", () => {
+  const c = connection("complete");
+  c.transfer!.name = "archive.zip";
+  c.transfer!.path = "/private/received/archive.zip";
+  c.transfer!.downloadPath = "Downloads/InvarDrop/received-transfer/archive.zip";
+  render(<FileTransfer connection={c} operate={vi.fn()} />);
+  expect(screen.getByText("Downloads/InvarDrop/received-transfer/archive.zip")).toBeTruthy();
+  expect(screen.queryByText("/private/received/archive.zip")).toBeNull();
+  expect(screen.getByRole("button", { name: "Extract ZIP" })).toBeTruthy();
+});

@@ -33,7 +33,7 @@ struct Record {
     #[serde(default)]
     resume_epoch: u64,
 }
-/// Master key exists only in the OS credential store; disk state is authenticated ciphertext.
+/// Master key comes from OS-protected storage; disk state is authenticated ciphertext.
 /// The lifetime lock prevents concurrent processes from silently overwriting trust changes.
 pub struct Store {
     path: PathBuf,
@@ -51,21 +51,32 @@ impl Store {
         let root = root.canonicalize().map_err(|_| Error::Storage)?;
         let account =
             hex(digest::digest(&digest::SHA256, root.to_string_lossy().as_bytes()).as_ref());
-        let entry = keyring::v1::Entry::new("io.github.invargervi.invardrop.identity-v1", &account)
-            .map_err(|_| Error::Storage)?;
         let exists = path.try_exists().map_err(|_| Error::Storage)?;
-        let master = match entry.get_secret() {
-            Ok(bytes) if bytes.len() == 32 && exists => Zeroizing::new(bytes),
-            Ok(_) => return Err(Error::Corrupt),
-            Err(keyring::v1::Error::NoEntry) if !exists => {
-                let bytes = Zeroizing::new(random::<32>()?.to_vec());
-                entry.set_secret(&bytes).map_err(|_| Error::Storage)?;
-                bytes
+        #[cfg(target_os = "android")]
+        let master = super::android_store::open(&root, &account, exists)?;
+        #[cfg(not(target_os = "android"))]
+        let master = {
+            let entry =
+                keyring::v1::Entry::new("io.github.invargervi.invardrop.identity-v1", &account)
+                    .map_err(|_| Error::Storage)?;
+            match entry.get_secret() {
+                Ok(bytes) if bytes.len() == 32 && exists => Zeroizing::new(bytes),
+                Ok(_) => return Err(Error::Corrupt),
+                Err(keyring::v1::Error::NoEntry) if !exists => {
+                    let bytes = Zeroizing::new(random::<32>()?.to_vec());
+                    entry.set_secret(&bytes).map_err(|_| Error::Storage)?;
+                    bytes
+                }
+                Err(keyring::v1::Error::NoEntry) => return Err(Error::Corrupt),
+                Err(_) => return Err(Error::Storage),
             }
-            Err(keyring::v1::Error::NoEntry) => return Err(Error::Corrupt),
-            Err(_) => return Err(Error::Storage),
         };
-        Self::load(path, lock, &master, exists)
+        let loaded = Self::load(path, lock, &master, exists);
+        #[cfg(target_os = "android")]
+        if loaded.is_ok() {
+            eprintln!("Android secure storage initialized (Android Keystore)");
+        }
+        loaded
     }
     fn load(path: PathBuf, lock: File, master: &[u8], exists: bool) -> Result<Self> {
         let key = aead::LessSafeKey::new(

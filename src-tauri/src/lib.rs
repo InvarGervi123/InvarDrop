@@ -1,4 +1,8 @@
+#[cfg(any(target_os = "android", test))]
+mod android_files;
 pub mod discovery;
+#[cfg(any(target_os = "android", test))]
+mod network_permission;
 mod processing;
 pub mod secure;
 
@@ -72,6 +76,7 @@ async fn secure_unblock(
 
 // Filesystem authority stays in Rust: IPC accepts only connection/transfer IDs.
 // A source path can enter this command only through the native picker.
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn file_choose(
     id: String,
@@ -142,6 +147,7 @@ async fn file_choose(
         }
     }
 }
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn folder_choose(
     id: String,
@@ -180,6 +186,22 @@ async fn folder_choose(
     }
 }
 
+// Android documents are selected through SAF and privately snapshotted for resume.
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn file_choose(
+    id: String,
+    picker: tauri::State<'_, android_files::Picker>,
+    service: tauri::State<'_, secure::Service>,
+) -> Result<(), String> {
+    android_files::choose(&picker, &service, &id).await
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn folder_choose() -> Result<(), String> {
+    Err("Folder selection is not implemented on Android".into())
+}
+
 #[tauri::command]
 fn processing_dismiss(
     id: String,
@@ -197,6 +219,7 @@ fn processing_snapshot(
 fn processing_converter_status(processing: tauri::State<'_, processing::Processing>) -> bool {
     processing.converter_configured()
 }
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn processing_converter(
     processing: tauri::State<'_, processing::Processing>,
@@ -209,6 +232,11 @@ async fn processing_converter(
         processing.configure(file.path().to_owned())?;
     }
     Ok(())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn processing_converter() -> Result<(), String> {
+    Err("Selecting an external FFmpeg executable is not supported on Android".into())
 }
 #[tauri::command]
 async fn processing_decide(
@@ -283,9 +311,14 @@ async fn file_cancel(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(android_files::init());
+    let app = builder
         .manage(processing::Processing::default())
         .setup(|app| {
+            #[cfg(target_os = "android")]
+            android_files::request_network_permission(app.handle());
             let port = Arc::new(AtomicU16::new(0));
             let handle = app.handle().clone();
             app.manage(Discovery::start_with_port(port.clone(), move |snapshot| {
@@ -296,8 +329,9 @@ pub fn run() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?.join("security-v1"));
             let handle = app.handle().clone();
-            app.manage(secure::Service::start(
+            app.manage(secure::Service::start_configured(
                 root,
+                Some(secure::downloads::Destination::for_app(app.handle())),
                 app.state::<Discovery>().snapshot().local_device.name,
                 port,
                 move |snapshot| {

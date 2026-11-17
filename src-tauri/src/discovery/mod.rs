@@ -221,6 +221,18 @@ fn run(
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
             Err(mpsc::TryRecvError::Empty) => {}
         }
+        #[cfg(target_os = "android")]
+        if !crate::network_permission::NETWORK.allowed() {
+            if crate::network_permission::NETWORK.denied() {
+                publish(&state, Status::Unavailable, Vec::new(), &notify);
+                break;
+            }
+            publish(&state, Status::Starting, Vec::new(), &notify);
+            match stop.recv_timeout(POLL_INTERVAL) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            }
+        }
         let advertised_port = port.load(Ordering::Acquire);
         let result = Session::new(&local, heartbeat, advertised_port).and_then(|session| {
             let mut tracker = Tracker::new(local.id.clone());

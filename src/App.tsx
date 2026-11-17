@@ -48,7 +48,7 @@ function App() {
         <p className="local-name">{snapshot ? <>This device: <span dir="auto">{snapshot.localDevice.name}</span></> : "Preparing local discovery…"}</p>
       </section>
       <ProcessingPanel />
-      {security?.receiveDirectory && <p className="receive-directory">Received files: <span dir="auto">{security.receiveDirectory}</span></p>}
+      {security?.receiveDirectory && <p className="receive-directory">Destination: Downloads/InvarDrop · Saved only after approval and verification</p>}
       {security && <TrustSettings snapshot={security} operate={operate} busy={pending > 0} />}
     </div>
     <footer>Offline &amp; account-free · By Invar Gervi</footer>

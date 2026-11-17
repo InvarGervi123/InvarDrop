@@ -33,7 +33,7 @@ export function PairCard({ connection: c, operate }: { connection: SecureConnect
     </>}
     {c.phase === "connected" && !incoming && <p className="file-hint">Peer key verified over TLS 1.3. Choose {c.supportsBundles ? "files or a folder" : "a file"}; the receiver approves each transfer.</p>}
     <FileTransfer connection={c} operate={operate} />
-    {c.error && <ErrorNotice message={c.error} />}
+    {c.error && c.error !== c.transfer?.error && <ErrorNotice message={c.error} />}
     {c.phase !== "closed" && <button type="button" className="secondary connection-action" onClick={() => void operate("secure_cancel", { id: c.id })}>{c.phase === "connected" ? "Disconnect" : "Cancel connection"}</button>}
     {c.phase === "closed" && c.canReconnect && <button type="button" className="secondary" onClick={() => void operate("secure_reconnect", { id: c.id })}>Reconnect with pinned key</button>}
   </section>;

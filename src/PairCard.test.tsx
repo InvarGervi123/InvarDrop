@@ -47,3 +47,15 @@ it("offers pinned reconnect and actionable guidance after disconnection", () => 
   expect(screen.getByRole("button", { name: "Reconnect with pinned key" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Choose files to send" })).toBeNull();
 });
+
+it("shows a propagated transfer error once and retains distinct connection errors", () => {
+  const c = { ...connection(), phase: "closed", code: null, error: "File could not be read or saved", transfer: {
+    id: "file", direction: "incoming", name: "image.png", size: 123, transferred: 0,
+    status: "error", error: "File could not be read or saved", path: null,
+    bytesPerSecond: null, etaSeconds: null,
+  } } as SecureConnection;
+  const view = render(<PairCard connection={c} operate={vi.fn()} />);
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+  view.rerender(<PairCard connection={{ ...c, error: "Connection failed or disconnected" }} operate={vi.fn()} />);
+  expect(screen.getAllByRole("alert")).toHaveLength(2);
+});

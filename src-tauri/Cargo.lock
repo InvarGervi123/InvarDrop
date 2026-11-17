@@ -2014,9 +2014,11 @@ name = "invardrop"
 version = "0.1.0-beta.1"
 dependencies = [
  "blake3",
+ "jni",
  "keyring",
  "libc",
  "mdns-sd",
+ "ndk-context",
  "rcgen",
  "rfd",
  "ring",

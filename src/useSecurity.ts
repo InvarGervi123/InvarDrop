@@ -8,7 +8,7 @@ export interface SecureConnection {
 }
 export interface FileTransfer {
   id: string; direction: "outgoing" | "incoming"; resuming: boolean; name: string; size: number; fileCount: number; isFolder: boolean;
-  senderName: string | null; transferred: number; bytesPerSecond: number | null; etaSeconds: number | null; status: string; path: string | null; error: string | null;
+  senderName: string | null; transferred: number; bytesPerSecond: number | null; etaSeconds: number | null; status: string; path: string | null; downloadPath?: string | null; error: string | null;
 }
 export interface ResumeView {
   id: string; peer: string; name: string; size: number; verified: number;

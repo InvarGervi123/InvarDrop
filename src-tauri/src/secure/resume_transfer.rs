@@ -139,7 +139,48 @@ impl Transfer {
                     resuming: true,
                 },
             )?;
-            completed(s, connection, &id, &path);
+            transaction(s, |state| {
+                let entry = state
+                    .entries
+                    .iter_mut()
+                    .find(|e| e.view.id == connection)
+                    .ok_or(Error::NotReady)?;
+                if *entry.cancel.borrow() || *s.stop.borrow() || entry.file_cancelled {
+                    return Err(Error::Cancelled);
+                }
+                // The original receive was explicitly approved and fully verified.
+                // Recovery only finishes its publication, not another data transfer.
+                entry.gate.begin()?;
+                entry.finish_running = true;
+                if let Some(transfer) = &mut entry.view.transfer {
+                    transfer.status = "committing".into();
+                }
+                Ok(())
+            })?;
+            let (done, result) = tokio::sync::oneshot::channel();
+            let shared = s.clone();
+            let cid = connection.to_owned();
+            let tid = id.clone();
+            let saved = path.clone();
+            let expected = manifest.clone();
+            let task = tokio::spawn(async move {
+                let result = save_downloads(&shared, &cid, &tid, &saved, &expected).await;
+                view(&shared, &cid, |entry| {
+                    entry.finish_running = false;
+                    if let Err(error) = &result
+                        && let Some(transfer) = &mut entry.view.transfer
+                    {
+                        transfer.status = "error".into();
+                        transfer.error = Some(error.to_string());
+                    }
+                });
+                if result.is_ok() {
+                    completed(&shared, &cid, &tid, &saved);
+                }
+                let _ = done.send(result);
+            });
+            lock(&s.tasks).push(task);
+            wait_result(framed, messages, result).await?;
             framed.send(&Message::ResumeComplete { id }).await?;
             return Ok(None);
         }
@@ -382,21 +423,27 @@ impl Transfer {
                 let connection = self.connection.clone();
                 let finished = id.clone();
                 let (done, result) = tokio::sync::oneshot::channel();
+                let manifest = self.manifest.clone();
                 let task = tokio::spawn(async move {
                     let committing_shared = shared.clone();
                     let committing_connection = connection.clone();
                     let committing_id = finished.clone();
-                    let result = blocking(move || {
-                        let receiver = lock(&receiver).take().ok_or(Error::Protocol)?;
-                        receiver.finish(gate, move || {
-                            transfer_view(
-                                &committing_shared,
-                                &committing_connection,
-                                &committing_id,
-                                "committing",
-                            )
+                    let result: Result<PathBuf> = async {
+                        let path = blocking(move || {
+                            let receiver = lock(&receiver).take().ok_or(Error::Protocol)?;
+                            receiver.finish(gate, move || {
+                                transfer_view(
+                                    &committing_shared,
+                                    &committing_connection,
+                                    &committing_id,
+                                    "committing",
+                                )
+                            })
                         })
-                    })
+                        .await?;
+                        save_downloads(&shared, &connection, &finished, &path, &manifest).await?;
+                        Ok(path)
+                    }
                     .await;
                     view(&shared, &connection, |entry| {
                         entry.finish_running = false;
@@ -562,6 +609,7 @@ fn reserve(
             eta_seconds: None,
             status: "awaiting_approval".into(),
             path: None,
+            download_path: None,
             error: None,
         });
         Ok(())

@@ -39,6 +39,8 @@ const MAX_HISTORY: usize = 24;
 pub const EVENT: &str = "security-updated";
 type Notify = Arc<dyn Fn(Snapshot) + Send + Sync>;
 type SharedStore = Arc<Mutex<Store>>;
+#[path = "connect.rs"]
+mod connect;
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -62,6 +64,7 @@ pub struct TransferView {
     pub eta_seconds: Option<u64>,
     pub status: String,
     pub path: Option<String>,
+    pub download_path: Option<String>,
     pub error: Option<String>,
 }
 impl TransferView {
@@ -149,22 +152,56 @@ struct Shared {
     file_approval_duration: Duration,
     local_name: Mutex<String>,
     receive_directory: PathBuf,
+    downloads: Option<super::downloads::Destination>,
+    listen_port: u16,
 }
 pub struct Service {
     shared: Arc<Shared>,
     listener: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 impl Service {
+    // Headless probes retain their isolated private profile and never write to
+    // the real user's Downloads. The application supplies a system destination.
     pub fn start(
         root: PathBuf,
         local_name: String,
         port: Arc<AtomicU16>,
         notify: impl Fn(Snapshot) + Send + Sync + 'static,
     ) -> Self {
-        let shared = make_shared(port, Arc::new(notify), PAIRING, root.join("received"));
+        Self::start_configured(root, None, local_name, port, notify)
+    }
+    pub(crate) fn start_configured(
+        root: PathBuf,
+        downloads: Option<super::downloads::Destination>,
+        local_name: String,
+        port: Arc<AtomicU16>,
+        notify: impl Fn(Snapshot) + Send + Sync + 'static,
+    ) -> Self {
+        let mut shared = make_shared(port, Arc::new(notify), PAIRING, root.join("received"));
+        Arc::get_mut(&mut shared)
+            .expect("new shared state")
+            .downloads = downloads;
+        let configured = std::env::var("INVARDROP_LISTEN_PORT");
+        let requested = match configured {
+            Ok(value) => connect::listen_port(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Ok(0),
+            Err(_) => Err(Error::ListenPort),
+        };
+        if let Ok(port) = requested.as_ref() {
+            Arc::get_mut(&mut shared)
+                .expect("new shared state")
+                .listen_port = *port;
+        }
         *lock(&shared.local_name) = local_name;
         let s = shared.clone();
         let listener = tauri::async_runtime::spawn(async move {
+            if let Err(error) = requested {
+                update(&s, |st| {
+                    st.snapshot.status = "unavailable".into();
+                    st.snapshot.error = Some(error.to_string());
+                });
+                return;
+            }
             let loaded = tokio::task::spawn_blocking(move || Store::open(&root)).await;
             match loaded {
                 Ok(Ok(store)) => {
@@ -344,6 +381,7 @@ impl Service {
                 eta_seconds: None,
                 status: "offering".into(),
                 path: None,
+                download_path: None,
                 error: None,
             };
             entry
@@ -397,7 +435,11 @@ impl Service {
             {
                 let entry = entry.map_err(|_| "Prepared storage unavailable")?;
                 let path = entry.path();
-                if entry.file_name().to_string_lossy().starts_with("audio-")
+                if (entry.file_name().to_string_lossy().starts_with("audio-")
+                    || entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("documents-"))
                     && super::bundle::regular_metadata(&path).is_ok_and(|m| m.is_dir())
                     && !paths
                         .iter()
@@ -510,6 +552,7 @@ impl Service {
                     eta_seconds: None,
                     status: "offering".into(),
                     path: None,
+                    download_path: None,
                     error: None,
                 });
             }
@@ -662,11 +705,13 @@ fn make_shared(
         stop,
         notify,
         port,
+        listen_port: 0,
         attempts: Mutex::new((Instant::now(), 0)),
         pairing_duration,
         file_approval_duration: FILE_APPROVAL,
         local_name: Mutex::new("InvarDrop".into()),
         receive_directory,
+        downloads: None,
     })
 }
 fn transaction<T>(s: &Shared, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
@@ -713,34 +758,43 @@ fn refresh_trust(s: &Shared) -> Result<()> {
         Ok(())
     })
 }
-fn listener_socket() -> Result<std::net::TcpListener> {
+fn listener_socket(port: u16) -> Result<std::net::TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};
     let v6 = (|| -> std::io::Result<_> {
         let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
         socket.set_only_v6(false)?;
         socket.set_nonblocking(true)?;
-        socket.bind(
-            &"[::]:0"
-                .parse::<SocketAddr>()
-                .map_err(std::io::Error::other)?
-                .into(),
-        )?;
+        socket.bind(&SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
         socket.listen(64)?;
         Ok(socket.into())
     })();
     v6.or_else(|_| {
-        let l = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+        let l = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
         l.set_nonblocking(true)?;
         Ok(l)
     })
-    .map_err(|_: std::io::Error| Error::Network)
+    .map_err(|_: std::io::Error| Error::ListenBind)
 }
 async fn listen(s: Arc<Shared>, store: SharedStore) -> Result<()> {
     let mut stop = s.stop.subscribe();
+    #[cfg(target_os = "android")]
+    while !crate::network_permission::NETWORK.allowed() {
+        if crate::network_permission::NETWORK.denied() {
+            return Err(Error::NetworkPermission);
+        }
+        if *stop.borrow() {
+            return Ok(());
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {},
+            _ = stop.changed() => return Ok(()),
+        }
+    }
     if *stop.borrow() {
         return Ok(());
     }
-    let listener = TcpListener::from_std(listener_socket()?).map_err(|_| Error::Network)?;
+    let listener =
+        TcpListener::from_std(listener_socket(s.listen_port)?).map_err(|_| Error::ListenBind)?;
     let port = listener.local_addr().map_err(|_| Error::Network)?.port();
     let identity = store_lock(&store)?.identity().fingerprint()?;
     let profile = s
@@ -910,25 +964,19 @@ async fn connection(
     let store = get_store(&s)?;
     let initiator = matches!(&input, Input::Outgoing(..));
     let mut target = None;
+    let tls_started = std::sync::atomic::AtomicBool::new(false);
     let handshake = async {
         let stream = match input {
             Input::Incoming(tcp) => {
+                tls_started.store(true, Ordering::Relaxed);
                 let acceptor = { transport::acceptor(store_lock(&store)?.identity())? };
-                TlsStream::Server(acceptor.accept(tcp).await.map_err(|_| Error::Identity)?)
+                TlsStream::Server(acceptor.accept(tcp).await.map_err(connect::tls_error)?)
             }
             Input::Outgoing(addresses, expected) => {
                 let connector = { transport::connector(store_lock(&store)?.identity(), expected)? };
-                let mut socket = None;
-                for address in addresses.into_iter().take(8) {
-                    if let Ok(Ok(tcp)) =
-                        timeout(Duration::from_millis(500), TcpStream::connect(address)).await
-                    {
-                        target = Some(address);
-                        socket = Some(tcp);
-                        break;
-                    }
-                }
-                let socket = socket.ok_or(Error::Network)?;
+                let (socket, address) = connect::tcp(addresses).await?;
+                target = Some(address);
+                tls_started.store(true, Ordering::Relaxed);
                 TlsStream::Client(
                     connector
                         .connect(
@@ -937,13 +985,15 @@ async fn connection(
                             socket,
                         )
                         .await
-                        .map_err(|_| Error::Identity)?,
+                        .map_err(connect::tls_error)?,
                 )
             }
         };
         Ok(stream)
     };
-    let mut stream = tokio::select! {r=timeout(HANDSHAKE,handshake)=>r.map_err(|_|Error::Expired)??,_=cancel.changed()=>return Err(Error::Cancelled),_=stop.changed()=>return Err(Error::Cancelled)};
+    let mut stream = tokio::select! {r=timeout(HANDSHAKE,handshake)=>r.map_err(|_|if tls_started.load(Ordering::Relaxed) { Error::TlsTimeout } else { Error::TcpTimeout })??,_=cancel.changed()=>return Err(Error::Cancelled),_=stop.changed()=>return Err(Error::Cancelled)};
+    #[cfg(debug_assertions)]
+    eprintln!("InvarDrop TLS handshake completed; checking peer identity and trust");
     let local = store_lock(&store)?.identity().fingerprint()?;
     let (peer, code) = transport::peer_and_code(&stream, &local, initiator)?;
     let trusted = {
@@ -979,7 +1029,12 @@ async fn connection(
             _ => Err(Error::Identity),
         }
     };
-    tokio::select! {r=timeout(HANDSHAKE,hello)=>r.map_err(|_|Error::Expired)??,_=cancel.changed()=>return Err(Error::Cancelled),_=stop.changed()=>return Err(Error::Cancelled)};
+    tokio::select! {r=timeout(HANDSHAKE,hello)=>r.map_err(|_|Error::AuthenticationTimeout)??,_=cancel.changed()=>return Err(Error::Cancelled),_=stop.changed()=>return Err(Error::Cancelled)};
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "InvarDrop peer authentication completed; pairing required: {}",
+        !trusted
+    );
     view(&s, id, |e| {
         e.view.peer = Some(peer.clone());
         e.view.supports_bundles = version >= 5;
@@ -1107,7 +1162,7 @@ async fn application<W: tokio::io::AsyncWrite + Unpin>(
         tokio::pin!(expiry);
         while !pairing.approved() {
             tokio::select! {
-                _=&mut expiry=>return Err(Error::Expired),
+                _=&mut expiry=>return Err(Error::PairingExpired),
                 action=actions.recv()=>{
                     let Action::Pairing{approve,code:provided}=action.ok_or(Error::Cancelled)? else {return Err(Error::Protocol);};
                     let result=pairing.local(approve,&provided,code,Instant::now());

@@ -155,3 +155,9 @@ GUI file-selection/transfer workflow was not completed because of GTK automation
 the reproducible TLS/filesystem tests above provide alternative coverage. This is
 not a claim of a full GUI end-to-end test. Windows GUI/picker/Credential Manager,
 two physical devices, and complex network scenarios need separate verification.
+
+
+Current application builds additionally publish verified receipts to the system
+Downloads directory. See [Downloads saving](downloads.md) for the destination,
+private staging, recovery and platform-specific limitations. The private receipt
+remains the authoritative recovery/processing copy.

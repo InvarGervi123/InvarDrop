@@ -354,3 +354,52 @@ async fn legacy_active_folder_keeps_prepared_sources_without_resume_ticket() {
     a.stop().await;
     b.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saf_prepared_file_survives_restart_requires_approval_and_cleans_after_delivery() {
+    let d = tempfile::tempdir().unwrap();
+    let da = d.path().join("sender");
+    let db = d.path().join("receiver");
+    let master = random::<32>().unwrap();
+    let a = start_with_master(&da, Duration::from_secs(10), &master).await;
+    let b = start(&db, Duration::from_secs(10)).await;
+    let (ac, bc) = pair(&a, &b).await;
+    let identity = a.snapshot().identity;
+    let batch = da.join("prepared/documents-test");
+    std::fs::create_dir_all(&batch).unwrap();
+    let image = batch.join("photo.png");
+    let bytes: Vec<u8> = (0..1200 * 1024).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&image, &bytes).unwrap();
+    a.send_resumable_file(&ac.id, &image).await.unwrap();
+    let offer = file_status(&b, &bc.id, "awaiting_approval").await;
+    assert_eq!(offer.size, bytes.len() as u64);
+    assert!(!db.join("received").exists());
+    a.cleanup_prepared().await.unwrap();
+    assert!(
+        image.exists(),
+        "A durable ticket must keep the SAF snapshot"
+    );
+    a.stop().await;
+    closed(&b, &bc.id).await;
+    drop(a);
+    let a = start_with_master(&da, Duration::from_secs(10), &master).await;
+    assert_eq!(a.snapshot().identity, identity);
+    a.cleanup_prepared().await.unwrap();
+    assert_eq!(std::fs::read(&image).unwrap(), bytes);
+    a.connect("reconnected".into(), vec![addr(&b)]).unwrap();
+    let ac = phase(&a, "connected").await;
+    let bc = phase(&b, "connected").await;
+    a.resume_transfer(&ac.id, &offer.id).await.unwrap();
+    let pending = file_status(&b, &bc.id, "awaiting_approval").await;
+    assert_eq!(pending.id, offer.id);
+    assert!(!db.join("received").exists());
+    b.respond_file(&bc.id, &offer.id, true).unwrap();
+    let received = file_status(&b, &bc.id, "complete").await;
+    file_status(&a, &ac.id, "complete").await;
+    assert_eq!(std::fs::read(received.path.unwrap()).unwrap(), bytes);
+    assert_eq!(std::fs::read(&image).unwrap(), bytes);
+    a.cleanup_prepared().await.unwrap();
+    assert!(!batch.exists());
+    a.stop().await;
+    b.stop().await;
+}

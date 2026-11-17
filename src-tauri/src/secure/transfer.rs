@@ -61,6 +61,30 @@ impl Incoming {
             Self::Bundle(s) => s.write(data).await,
         }
     }
+    fn receipt_manifest(&self, hash: Option<&str>) -> Result<resume::Manifest> {
+        let manifest = match (self, hash) {
+            (Self::Single(sink), Some(hash)) => {
+                let (name, size) = sink.receipt_metadata();
+                resume::Manifest {
+                    tree: Manifest {
+                        name: name.into(),
+                        total: size,
+                        entries: vec![super::super::bundle::Entry {
+                            path: name.into(),
+                            kind: super::super::bundle::Kind::File,
+                            size,
+                        }],
+                    },
+                    hashes: vec![hash.into()],
+                    folder: false,
+                }
+            }
+            (Self::Bundle(sink), None) => sink.receipt_manifest(),
+            _ => return Err(Error::Protocol),
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
     async fn finish(
         self,
         hash: Option<String>,
@@ -211,6 +235,7 @@ fn reserve_offer(
             eta_seconds: None,
             status: "awaiting_approval".into(),
             path: None,
+            download_path: None,
             error: None,
         });
         Ok(true)
@@ -452,7 +477,12 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
                         let (done, result) = tokio::sync::oneshot::channel();
                         let finalize=tokio::spawn(async move {
                             let committing_shared=shared.clone(); let committing_cid=cid.clone(); let committing_id=finished.clone();
-                            let result=sink.finish(hash, gate, move || transfer_view(&committing_shared,&committing_cid,&committing_id,"committing")).await;
+                            let result: Result<PathBuf>=async {
+                                let manifest = sink.receipt_manifest(hash.as_deref())?;
+                                let path = sink.finish(hash, gate, move || transfer_view(&committing_shared,&committing_cid,&committing_id,"committing")).await?;
+                                save_downloads(&shared, &cid, &finished, &path, &manifest).await?;
+                                Ok(path)
+                            }.await;
                             view(&shared,&cid,|entry|{
                                 entry.finish_running=false;
                                 if let Some(transfer)=&mut entry.view.transfer && transfer.id==finished {
@@ -559,4 +589,26 @@ fn supports_resume(s: &Shared, connection: &str) -> bool {
         .iter()
         .find(|e| e.view.id == connection)
         .is_some_and(|e| e.view.supports_resume)
+}
+
+// Private receipts remain authoritative for ZIP processing and recovery. Only
+// this post-verification owner can publish a destination to the Downloads UI.
+async fn save_downloads(
+    s: &Shared,
+    connection: &str,
+    id: &str,
+    path: &std::path::Path,
+    manifest: &resume::Manifest,
+) -> Result<()> {
+    if let Some(destination) = &s.downloads {
+        let location = destination.publish(id, path, manifest).await?;
+        view(s, connection, |entry| {
+            if let Some(transfer) = &mut entry.view.transfer
+                && transfer.id == id
+            {
+                transfer.download_path = Some(location);
+            }
+        });
+    }
+    Ok(())
 }

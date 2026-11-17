@@ -119,8 +119,18 @@ impl Manifest {
 }
 // Reject all Windows reparse points too (junctions need not be ordinary symlinks).
 pub(crate) fn regular_metadata(path: &Path) -> Result<fs::Metadata> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| Error::FileIo)?;
+    let metadata = fs::symlink_metadata(path).map_err(|_error| {
+        #[cfg(target_os = "android")]
+        eprintln!(
+            "Android transfer metadata failed: {:?} (os {:?})",
+            _error.kind(),
+            _error.raw_os_error()
+        );
+        Error::FileIo
+    })?;
     if metadata.file_type().is_symlink() {
+        #[cfg(target_os = "android")]
+        eprintln!("Android transfer metadata: symbolic link rejected");
         return Err(Error::FileIo);
     }
     #[cfg(windows)]
@@ -316,6 +326,7 @@ pub struct BundleSink {
     current: Option<OpenFile>, // closed before TempDir cleanup on Windows
     staging: TempDir,
     manifest: Manifest,
+    hashes: Vec<String>,
     index: usize,
     received: u64,
 }
@@ -353,10 +364,18 @@ impl BundleSink {
         Ok(Self {
             current: None,
             staging,
+            hashes: vec![String::new(); manifest.entries.len()],
             manifest,
             index: 0,
             received: 0,
         })
+    }
+    pub(crate) fn receipt_manifest(&self) -> super::resume::Manifest {
+        super::resume::Manifest {
+            tree: self.manifest.clone(),
+            hashes: self.hashes.clone(),
+            folder: true,
+        }
     }
     fn skip_directories(&mut self) {
         while self
@@ -431,6 +450,7 @@ impl BundleSink {
         // Durability IO belongs to whole-operation finalization. Keeping fsync
         // out of this frame handler lets large files continue exchanging pings.
         drop(current.file.into_std().await);
+        self.hashes[self.index] = hash.to_hex().to_string();
         self.index += 1;
         Ok(())
     }
@@ -522,13 +542,14 @@ fn private_dir(inbox: &Path, prefix: &str) -> Result<TempDir> {
     builder.tempdir_in(inbox).map_err(|_| Error::FileIo)
 }
 pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
         let from = CString::new(from.as_os_str().as_bytes())?;
         let to = CString::new(to.as_os_str().as_bytes())?;
         // SAFETY: NUL-terminated paths remain alive for this synchronous call.
-        if unsafe {
+        #[cfg(target_os = "linux")]
+        let status = unsafe {
             libc::renameat2(
                 libc::AT_FDCWD,
                 from.as_ptr(),
@@ -536,8 +557,21 @@ pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
                 to.as_ptr(),
                 libc::RENAME_NOREPLACE,
             )
-        } == 0
-        {
+        };
+        // Bionic's renameat2 wrapper requires API 30. Use the same Linux syscall
+        // on Android so API 24+ can retain atomic no-replace publication.
+        #[cfg(target_os = "android")]
+        let status = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if status == 0 {
             Ok(())
         } else {
             Err(std::io::Error::last_os_error())
@@ -558,7 +592,7 @@ pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
             Err(std::io::Error::last_os_error())
         }
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
     {
         let _ = (from, to);
         Err(std::io::Error::new(

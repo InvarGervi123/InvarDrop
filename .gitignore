@@ -31,6 +31,7 @@ test-results/
 
 # Encrypted security state is local-only too
 identity.enc
+master.android.enc
 profile.lock
 security-v1/
 

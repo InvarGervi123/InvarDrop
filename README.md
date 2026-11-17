@@ -1,8 +1,10 @@
 # InvarDrop
 
-Minimalist LAN file sharing application in development. Target platforms: Linux
-and Windows, with Android planned later. Both are CI build targets; native
-discovery has been exercised locally on CachyOS.
+Minimalist LAN file sharing for Linux and Windows, with experimental Android
+ARM64 support. Desktop builds are CI targets. Basic bidirectional Android/Linux
+transfers and automatic Downloads saving have been manually verified on a
+Galaxy S25, as reported by the user; see the
+[Android verification scope and limitations](docs/android-stabilization.md).
 
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
@@ -31,7 +33,8 @@ approvals. Reconnect verifies the saved public key; the UI supports disconnect,
 trust revocation and explicitly allowing a fresh pairing after revocation.
 The OS credential store protects the master key for encrypted local identity and
 trust state. Linux needs an available, unlocked Secret Service; Windows uses
-Credential Manager. Storage failure disables secure connections without a plaintext
+Credential Manager; Android uses Android Keystore. Storage failure disables
+secure connections without a plaintext
 fallback.
 
 Trusted devices can send a file, multiple files or a complete nested folder over
@@ -39,8 +42,10 @@ their existing TLS connection. Native dialogs select files or a folder; the rece
 explicitly approves the name, file count and total size of each operation.
 Empty directories and zero-byte files are supported, with a 1 TiB total limit,
 4096 entries and depth 16. Files stream in bounded 64 KiB chunks, with incremental BLAKE3
-verification before finalization. Received files go to a private, separate receipt
-directory under the profile's `received` folder; the UI shows the local path.
+verification before finalization. Incomplete data stays private. Verified receipts
+are saved automatically to the system Downloads directory under
+`InvarDrop/received-<transfer-id>/<original-name>`; the UI shows the public location.
+See [Downloads saving, recovery and platform limitations](docs/downloads.md).
 Existing files are never replaced. File names and destinations cannot be supplied
 as arbitrary filesystem paths through IPC or by the peer.
 
