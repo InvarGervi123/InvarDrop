@@ -306,7 +306,7 @@ impl Controller {
             #[cfg(target_os = "android")]
             let result = android::run(shared.clone(), rx, stopped).await;
             #[cfg(not(any(target_os = "linux", target_os = "android")))]
-            let result = {
+            let result: std::result::Result<(), String> = {
                 drop((rx, stopped));
                 Err("Bluetooth support is not yet available on this platform".to_string())
             };
