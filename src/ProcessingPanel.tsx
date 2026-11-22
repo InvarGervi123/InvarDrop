@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { formatBytes } from "./FileTransfer";
 import { ErrorNotice } from "./ErrorNotice";
 
@@ -10,10 +11,10 @@ const labels: Record<string, string> = {
   failed: "Processing failed", cancelled: "Processing cancelled",
 };
 const terminal = (state: string) => ["prepared", "complete", "failed", "cancelled"].includes(state);
-export function ProcessingPanel() {
+export function ProcessingPanel({ settingsOpen = true }: { settingsOpen?: boolean } = {}) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [pollError, setPollError] = useState(false);
+  const [updateError, setUpdateError] = useState(false);
   const [converter, setConverter] = useState<boolean | null>(null);
   const [pending, setPending] = useState(new Set<string>());
   const [submitted, setSubmitted] = useState(new Set<string>());
@@ -31,29 +32,41 @@ export function ProcessingPanel() {
   useEffect(() => {
     if (!native) return;
     let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    // Schedule only after the previous request settles; slow IPC cannot build a queue.
-    const refresh = async () => {
-      try {
-        const next = await invoke<Job[]>("processing_snapshot");
-        if (!disposed) {
+    let unlisten: UnlistenFn | undefined;
+    let running = false;
+    let changed = false;
+    const accept = async () => {
+      if (running) { changed = true; return; }
+      running = true;
+      do {
+        changed = false;
+        try {
+          const next = await invoke<Job[]>("processing_snapshot");
+          if (disposed) break;
           const visible = next.filter(job => !dismissed.current.has(job.id));
           const keys = ["id", "name", "state", "done", "total", "error", "path"] as const;
           setJobs(previous => previous.length === visible.length && previous.every((job, i) => keys.every(key => job[key] === visible[i][key])) ? previous : visible);
-          setPollError(false);
+          setUpdateError(false);
           const ids = new Set(visible.map(job => job.id));
-          let changed = false;
+          let removed = false;
           for (const key of acknowledged.current) {
-            if (!ids.has(key.slice(key.indexOf(":") + 1))) { acknowledged.current.delete(key); changed = true; }
+            if (!ids.has(key.slice(key.indexOf(":") + 1))) { acknowledged.current.delete(key); removed = true; }
           }
-          if (changed) setSubmitted(new Set(acknowledged.current));
-        }
-      } catch { if (!disposed) setPollError(true); }
-      if (!disposed) timer = setTimeout(() => void refresh(), 500);
+          if (removed) setSubmitted(new Set(acknowledged.current));
+        } catch { if (!disposed) setUpdateError(true); }
+      } while (changed && !disposed);
+      running = false;
     };
-    void refresh();
+    void (async () => {
+      try {
+        const stop = await listen("processing-updated", () => void accept());
+        if (disposed) { stop(); return; }
+        unlisten = stop;
+      } catch { if (!disposed) setUpdateError(true); }
+      if (!disposed) void accept();
+    })();
     void invoke<boolean>("processing_converter_status").then(value => { if (!disposed) setConverter(value); }).catch(() => { if (!disposed) setError("Could not check FFmpeg selection. Choose a trusted executable to configure conversion."); });
-    return () => { disposed = true; clearTimeout(timer); };
+    return () => { disposed = true; unlisten?.(); };
   }, [native]);
   const run = async (command: string, args: Record<string, unknown> = {}, id = command) => {
     const key = `${command}:${id}`;
@@ -76,9 +89,9 @@ export function ProcessingPanel() {
     <button type="button" className="secondary" disabled={!native || pending.has("processing_converter:processing_converter")} onClick={() => void run("processing_converter")}>{pending.has("processing_converter:processing_converter") ? "Choosing executable…" : "Choose FFmpeg executable"}</button>
     <p>Choose only a trusted local FFmpeg executable. Your selection is cleared when the app closes.</p>
   </details>;
-  return <section ref={panel} className={jobs.length ? "pair-card processing-panel" : "processing-panel"} aria-label="Optional file processing">
+  return <section hidden={!settingsOpen && jobs.length === 0 && !error && !updateError} ref={panel} className={jobs.length ? "pair-card processing-panel" : "processing-panel"} aria-label="Optional file processing">
     {jobs.length > 0 && <><h2>File preparation &amp; extraction</h2><p className="file-hint">Separate from transfer. Original files stay unchanged.</p></>}
-    {pollError && <ErrorNotice message="Could not refresh processing status. Retrying automatically." />}
+    {updateError && <ErrorNotice message="Could not update file preparation status." />}
     {error && <ErrorNotice message={error} />}
     {jobs.map(job => {
       const deciding = pending.has(`processing_decide:${job.id}`) || submitted.has(`processing_decide:${job.id}`);
@@ -92,7 +105,7 @@ export function ProcessingPanel() {
         {job.total > 0 && !["failed", "cancelled"].includes(job.state) && <p className="file-hint">{extraction ? `${formatBytes(job.done)} / ${formatBytes(job.total)} extracted` : `${job.done} / ${job.total} audio files prepared`}</p>}
         {job.state === "choice" && <>
           <p>OGG audio found. Keep its original format, or convert it to MP3 before offering the transfer. The receiver will see the prepared names and sizes.</p>
-          {converter !== true && <p className="file-hint">Conversion needs a selected FFmpeg executable. You can keep originals now or choose FFmpeg in Optional audio conversion below.</p>}
+          {converter !== true && <p className="file-hint">Conversion needs a selected FFmpeg executable. You can keep originals now or choose FFmpeg in Settings.</p>}
           <div className="request-actions"><button type="button" disabled={deciding || cancelling} onClick={() => void run("processing_decide", { id: job.id, convert: false }, job.id)}>Keep originals</button><button type="button" className="secondary" disabled={converter !== true || deciding || cancelling} onClick={() => void run("processing_decide", { id: job.id, convert: true }, job.id)}>Convert OGG to MP3</button></div>
         </>}
         {["choice", "converting", "extracting"].includes(job.state) && <button type="button" className="secondary connection-action" disabled={cancelling || (job.state === "choice" && deciding)} onClick={() => void run("processing_cancel", { id: job.id }, job.id)}>Cancel processing</button>}
@@ -103,6 +116,6 @@ export function ProcessingPanel() {
         {job.path && <p className="saved-path">Extracted to: <span dir="auto">{job.path}</span></p>}
       </section>;
     })}
-    {settings}
+    {settingsOpen && settings}
   </section>;
 }

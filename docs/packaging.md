@@ -5,8 +5,9 @@ Milestone 2.9 was reviewed and merged through
 and Windows checks for `4147e3d` and the PR. This milestone adds installation
 packages. The first public prerelease is **v0.1.0-beta.1**; milestones are engineering
 checkpoints, not release version numbers. See [Beta installation and limitations](beta-release.md).
-Publication is manual, after exact-commit CI and checksum verification; there is
-no automatic release or updater distribution.
+Publication is manual after exact-commit CI and checksum verification. See the
+[beta.2 candidate guide](release-candidate.md) for current installation, Android
+signing, and physical tests.
 
 ## Targets and prerequisites
 
@@ -38,7 +39,7 @@ replace a trusted signature or establish the publisher's identity.
 For the Debian package on a compatible system:
 
 ```sh
-sudo apt install ./InvarDrop_0.1.0-beta.1_amd64.deb
+sudo apt install ./InvarDrop_0.1.1-beta.2_amd64.deb
 invardrop
 sudo apt remove invar-drop
 ```
@@ -52,14 +53,14 @@ maintainer scripts, services, firewall changes, file associations, or autostart.
 For AppImage:
 
 ```sh
-chmod u+x InvarDrop_0.1.0-beta.1_amd64.AppImage
-./InvarDrop_0.1.0-beta.1_amd64.AppImage
+chmod u+x InvarDrop_0.1.1-beta.2_amd64.AppImage
+./InvarDrop_0.1.1-beta.2_amd64.AppImage
 ```
 
 If FUSE is unavailable, the runtime also supports extraction/run without a mount:
 
 ```sh
-./InvarDrop_0.1.0-beta.1_amd64.AppImage --appimage-extract-and-run
+./InvarDrop_0.1.1-beta.2_amd64.AppImage --appimage-extract-and-run
 ```
 
 AppImage does not automatically install a desktop shortcut. Delete the AppImage
@@ -73,8 +74,9 @@ Choose one format, not both. NSIS installs the application for the current user;
 MSI uses Tauri's standard per-machine installation and can require administrator
 approval. Application icons, publisher metadata, Start Menu integration, English
 installer UI, and a stable WiX upgrade code are configured. Downgrades are disabled
-within Tauri's supported installer paths. The application SemVer is `0.1.0-beta.1`;
-WiX uses the required numeric MSI ProductVersion `0.1.0.1`. The stable upgrade
+within Tauri's supported installer paths. The candidate application SemVer is `0.1.1-beta.2`.
+WiX uses the numeric MSI ProductVersion `0.1.1` so the first three fields advance
+from beta.1. The stable upgrade
 code and application identifier are unchanged. Switching between NSIS and MSI requires
 removing the previous installation first; profile data is retained.
 
@@ -132,8 +134,8 @@ Linux CI also exercises real dpkg install/remove on an ephemeral runner with
 profile, received-file and recovery sentinels. These checks do not replace a
 security audit or physical runtime testing.
 
-CI uploads only installers, the license, documentation, payload audit reports and
-SHA-256 manifests as test artifacts retained for seven days. The approved Beta
+Desktop CI uploads installers, the license, documentation, payload audit reports
+and SHA-256 manifests as test artifacts retained for seven days. The approved Beta
 publication copies the four audited installers from the exact release commit,
 verifies their checksums, and publishes a manual GitHub prerelease. No automatic
 release workflow, update service or new application permission is added. Generated package data stays under ignored `target` directories; Tauri may also

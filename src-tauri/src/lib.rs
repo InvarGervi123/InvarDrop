@@ -1,10 +1,13 @@
 #[cfg(any(target_os = "android", test))]
 mod android_files;
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+mod bluetooth;
 pub mod discovery;
 #[cfg(any(target_os = "android", test))]
 mod network_permission;
 mod processing;
 pub mod secure;
+mod share;
 
 use discovery::{Discovery, Snapshot};
 use std::sync::{Arc, atomic::AtomicU16};
@@ -23,16 +26,50 @@ async fn secure_connect(
     id: String,
     discovery: tauri::State<'_, Discovery>,
     service: tauri::State<'_, secure::Service>,
+    bluetooth: tauri::State<'_, Arc<bluetooth::Controller>>,
 ) -> Result<String, String> {
     let peer = discovery
         .snapshot()
         .devices
         .into_iter()
-        .find(|d| d.id == id && d.can_connect)
-        .ok_or("Device is no longer available")?;
+        .find(|d| d.id == id && d.can_connect);
+    if peer.is_none() && !bluetooth.has_peer(&id) {
+        return Err("Device is no longer available".into());
+    }
     service
-        .connect(peer.id, peer.endpoints)
+        .connect_nearby(id, peer.map(|p| p.endpoints).unwrap_or_default())
         .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn bluetooth_snapshot(
+    bluetooth: tauri::State<'_, Arc<bluetooth::Controller>>,
+) -> bluetooth::Snapshot {
+    bluetooth.snapshot()
+}
+#[tauri::command]
+async fn bluetooth_enable(
+    bluetooth: tauri::State<'_, Arc<bluetooth::Controller>>,
+) -> Result<(), String> {
+    bluetooth.inner().enable(true).await
+}
+#[tauri::command]
+async fn bluetooth_start(
+    bluetooth: tauri::State<'_, Arc<bluetooth::Controller>>,
+) -> Result<(), String> {
+    bluetooth.inner().enable(false).await
+}
+#[tauri::command]
+fn bluetooth_scan(bluetooth: tauri::State<'_, Arc<bluetooth::Controller>>) {
+    bluetooth.scan();
+}
+#[tauri::command]
+async fn bluetooth_disable(
+    bluetooth: tauri::State<'_, Arc<bluetooth::Controller>>,
+    service: tauri::State<'_, secure::Service>,
+) -> Result<(), String> {
+    service.disconnect_bluetooth();
+    bluetooth.disable().await;
+    Ok(())
 }
 #[tauri::command]
 async fn secure_respond(
@@ -72,134 +109,6 @@ async fn secure_unblock(
     service: tauri::State<'_, secure::Service>,
 ) -> Result<(), String> {
     service.unblock(id).await.map_err(|e| e.to_string())
-}
-
-// Filesystem authority stays in Rust: IPC accepts only connection/transfer IDs.
-// A source path can enter this command only through the native picker.
-#[cfg(not(target_os = "android"))]
-#[tauri::command]
-async fn file_choose(
-    id: String,
-    processing: tauri::State<'_, processing::Processing>,
-    service: tauri::State<'_, secure::Service>,
-) -> Result<(), String> {
-    service.can_send_file(&id).map_err(|e| e.to_string())?;
-    let supports_bundles = service
-        .snapshot()
-        .connections
-        .iter()
-        .find(|c| c.id == id)
-        .is_some_and(|c| c.supports_bundles);
-    let dialog = rfd::AsyncFileDialog::new().set_title("Choose files to send");
-    let selected = if supports_bundles {
-        dialog.pick_files().await
-    } else {
-        dialog.pick_file().await.map(|file| vec![file])
-    };
-    let Some(files) = selected else {
-        return Ok(());
-    };
-    if processing
-        .select(
-            &service,
-            id.clone(),
-            files.iter().map(|f| f.path().to_owned()).collect(),
-            false,
-        )
-        .await?
-    {
-        return Ok(());
-    }
-    if files.len() == 1 {
-        let source = secure::files::Source::open(files[0].path())
-            .await
-            .map_err(|e| e.to_string())?;
-        if service
-            .snapshot()
-            .connections
-            .iter()
-            .any(|c| c.id == id && c.supports_resume)
-        {
-            service
-                .send_resumable_file(&id, files[0].path())
-                .await
-                .map_err(|e| e.to_string())
-        } else {
-            service.send_file(&id, source).map_err(|e| e.to_string())
-        }
-    } else {
-        let paths = files.into_iter().map(|f| f.path().to_owned()).collect();
-        let source = secure::bundle::BundleSource::files(paths)
-            .await
-            .map_err(|e| e.to_string())?;
-        if service
-            .snapshot()
-            .connections
-            .iter()
-            .any(|c| c.id == id && c.supports_resume)
-        {
-            service
-                .send_resumable_bundle(&id, source)
-                .await
-                .map_err(|e| e.to_string())
-        } else {
-            service.send_bundle(&id, source).map_err(|e| e.to_string())
-        }
-    }
-}
-#[cfg(not(target_os = "android"))]
-#[tauri::command]
-async fn folder_choose(
-    id: String,
-    processing: tauri::State<'_, processing::Processing>,
-    service: tauri::State<'_, secure::Service>,
-) -> Result<(), String> {
-    service.can_send_file(&id).map_err(|e| e.to_string())?;
-    let Some(folder) = rfd::AsyncFileDialog::new()
-        .set_title("Choose a folder to send")
-        .pick_folder()
-        .await
-    else {
-        return Ok(());
-    };
-    if processing
-        .select(&service, id.clone(), vec![folder.path().to_owned()], true)
-        .await?
-    {
-        return Ok(());
-    }
-    let source = secure::bundle::BundleSource::folder(folder.path())
-        .await
-        .map_err(|e| e.to_string())?;
-    if service
-        .snapshot()
-        .connections
-        .iter()
-        .any(|c| c.id == id && c.supports_resume)
-    {
-        service
-            .send_resumable_bundle(&id, source)
-            .await
-            .map_err(|e| e.to_string())
-    } else {
-        service.send_bundle(&id, source).map_err(|e| e.to_string())
-    }
-}
-
-// Android documents are selected through SAF and privately snapshotted for resume.
-#[cfg(target_os = "android")]
-#[tauri::command]
-async fn file_choose(
-    id: String,
-    picker: tauri::State<'_, android_files::Picker>,
-    service: tauri::State<'_, secure::Service>,
-) -> Result<(), String> {
-    android_files::choose(&picker, &service, &id).await
-}
-#[cfg(target_os = "android")]
-#[tauri::command]
-async fn folder_choose() -> Result<(), String> {
-    Err("Folder selection is not implemented on Android".into())
 }
 
 #[tauri::command]
@@ -314,9 +223,15 @@ pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "android")]
     let builder = builder.plugin(android_files::init());
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(bluetooth::android_plugin());
     let app = builder
-        .manage(processing::Processing::default())
+        .manage(share::Composer::default())
         .setup(|app| {
+            let handle = app.handle().clone();
+            app.manage(processing::Processing::with_updates(move || {
+                let _ = handle.emit_to("main", processing::EVENT, ());
+            }));
             #[cfg(target_os = "android")]
             android_files::request_network_permission(app.handle());
             let port = Arc::new(AtomicU16::new(0));
@@ -338,10 +253,29 @@ pub fn run() {
                     let _ = handle.emit_to("main", secure::EVENT, snapshot);
                 },
             ));
+            let local = app.state::<Discovery>().snapshot().local_device;
+            let handle = app.handle().clone();
+            let bluetooth = bluetooth::Controller::new(
+                local.id,
+                local.name,
+                #[cfg(target_os = "android")]
+                app.handle().clone(),
+                move |snapshot| {
+                    let _ = handle.emit_to("main", bluetooth::EVENT, snapshot);
+                },
+            );
+            app.state::<secure::Service>()
+                .attach_bluetooth(bluetooth.clone());
+            app.manage(bluetooth);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             discovery_snapshot,
+            bluetooth_snapshot,
+            bluetooth_enable,
+            bluetooth_start,
+            bluetooth_scan,
+            bluetooth_disable,
             security_snapshot,
             secure_connect,
             secure_respond,
@@ -349,7 +283,9 @@ pub fn run() {
             secure_reconnect,
             secure_revoke,
             secure_unblock,
-            file_choose,
+            share::share_pick,
+            share::share_clear,
+            share::share_send,
             processing_dismiss,
             processing_snapshot,
             processing_converter_status,
@@ -359,7 +295,6 @@ pub fn run() {
             processing_extract,
             resume_transfer,
             resume_discard,
-            folder_choose,
             file_respond,
             file_cancel
         ])
@@ -368,6 +303,7 @@ pub fn run() {
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
             handle.state::<processing::Processing>().shutdown();
+            tauri::async_runtime::block_on(handle.state::<Arc<bluetooth::Controller>>().disable());
             tauri::async_runtime::block_on(handle.state::<secure::Service>().stop());
             handle.state::<Discovery>().stop();
         }

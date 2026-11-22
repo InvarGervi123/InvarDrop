@@ -612,7 +612,9 @@ fn no_received_files(service: &Service) {
     let inbox = &service.shared.receive_directory;
     assert!(!inbox.exists() || std::fs::read_dir(inbox).unwrap().next().is_none());
 }
-async fn raw_message(tls: &mut tokio_rustls::TlsStream<TcpStream>) -> Message {
+async fn raw_message<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    tls: &mut tokio_rustls::TlsStream<S>,
+) -> Message {
     timeout(Duration::from_secs(5), async {
         loop {
             match protocol::receive(tls).await.unwrap() {
@@ -2059,3 +2061,6 @@ mod downloads_regressions;
 #[cfg(unix)]
 #[path = "large_transfer_tests.rs"]
 mod large_transfer_regressions;
+
+#[path = "stream_tests.rs"]
+mod stream_tests;

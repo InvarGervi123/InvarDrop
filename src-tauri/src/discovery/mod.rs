@@ -15,7 +15,9 @@ use tracker::Tracker;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
+#[cfg(target_os = "android")]
+const STARTUP_WAIT: Duration = Duration::from_millis(250);
+const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(1);
 const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const EVENT_NAME: &str = "discovery-updated";
 
@@ -43,6 +45,7 @@ pub enum Status {
 pub struct Snapshot {
     pub revision: u64,
     pub local_device: Device,
+    pub supports_folder_picker: bool,
     pub status: Status,
     pub devices: Vec<Device>,
 }
@@ -75,6 +78,7 @@ impl Discovery {
         let state = Arc::new(Mutex::new(Snapshot {
             revision: 0,
             local_device: protocol::local_device(),
+            supports_folder_picker: !cfg!(target_os = "android"),
             status: Status::Starting,
             devices: Vec::new(),
         }));
@@ -146,7 +150,7 @@ impl Session {
         let daemon = ServiceDaemon::new()?;
         let initialize = || {
             let monitor = daemon.monitor()?;
-            daemon.set_ip_check_interval(2)?;
+            daemon.set_ip_check_interval(5)?;
             let info = protocol::announcement(local, heartbeat, port)?;
             let fullname = info.get_fullname().to_owned();
             daemon.register(info)?;
@@ -228,7 +232,7 @@ fn run(
                 break;
             }
             publish(&state, Status::Starting, Vec::new(), &notify);
-            match stop.recv_timeout(POLL_INTERVAL) {
+            match stop.recv_timeout(STARTUP_WAIT) {
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
             }
@@ -242,9 +246,11 @@ fn run(
             let mut announced = false;
             publish(&state, Status::Starting, Vec::new(), &notify);
             loop {
-                match stop.recv_timeout(POLL_INTERVAL) {
-                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                // Wake immediately for a peer event, with a bounded idle check for
+                // listener changes, daemon health, expirations and shutdown.
+                let first = session.services.recv_timeout(HOUSEKEEPING_INTERVAL).ok();
+                if !matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                    return Ok(());
                 }
                 for event in session.monitor.try_iter().take(128) {
                     match event {
@@ -260,7 +266,11 @@ fn run(
                     return Err(mdns_sd::Error::DaemonShutdown);
                 }
                 let now = Instant::now();
-                for event in session.services.try_iter().take(128) {
+                for event in first
+                    .into_iter()
+                    .chain(session.services.try_iter())
+                    .take(128)
+                {
                     match event {
                         ServiceEvent::ServiceResolved(service) => {
                             if let Some((device, beat)) = protocol::parse(&service) {
@@ -340,6 +350,7 @@ mod tests {
         let state = Mutex::new(Snapshot {
             revision: 0,
             local_device: protocol::local_device(),
+            supports_folder_picker: !cfg!(target_os = "android"),
             status: Status::Starting,
             devices: Vec::new(),
         });

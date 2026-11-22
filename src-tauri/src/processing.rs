@@ -14,6 +14,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+pub(crate) const EVENT: &str = "processing-updated";
 const MAX_OUTPUT: u64 = 2 * 1024 * 1024 * 1024;
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +34,8 @@ struct Selection {
     folder: bool,
 }
 struct Job {
+    #[cfg(not(target_os = "android"))]
+    connection: Option<String>,
     view: View,
     selection: Option<Selection>,
     cancel: Arc<CommitGate>,
@@ -42,6 +45,7 @@ pub struct Processing {
     jobs: Arc<Mutex<Vec<Job>>>,
     ffmpeg: Mutex<Option<PathBuf>>,
     preparation: tokio::sync::Mutex<()>,
+    notify: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 fn err() -> String {
     "Processing failed; original files were preserved".into()
@@ -76,6 +80,19 @@ fn check_ogg(path: &Path) -> Result<(), String> {
     Ok(())
 }
 impl Processing {
+    pub fn with_updates(notify: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            notify: Some(Arc::new(notify)),
+            ..Self::default()
+        }
+    }
+
+    fn changed(&self) {
+        if let Some(notify) = &self.notify {
+            notify();
+        }
+    }
+
     pub fn shutdown(&self) {
         for job in lock(&self.jobs).iter() {
             let _ = job.cancel.cancel();
@@ -96,6 +113,7 @@ impl Processing {
         // Report selection only; do not expose a local path or claim codec support.
         lock(&self.ffmpeg).is_some()
     }
+    #[cfg(any(not(target_os = "android"), test))]
     pub fn configure(&self, path: PathBuf) -> Result<(), String> {
         if !path.is_absolute()
             || !bundle::regular_metadata(&path)
@@ -121,6 +139,8 @@ impl Processing {
             return Err("Stop processing first".into());
         }
         jobs.retain(|j| j.view.id != id);
+        drop(jobs);
+        self.changed();
         Ok(())
     }
     pub fn cancel(&self, id: &str) -> Result<(), String> {
@@ -131,8 +151,19 @@ impl Processing {
             job.selection = None;
             job.view.state = "cancelled".into();
         }
+        drop(jobs);
+        self.changed();
         Ok(())
     }
+    #[cfg(not(target_os = "android"))]
+    pub fn preparing_for(&self, connection_id: &str) -> bool {
+        lock(&self.jobs).iter().any(|job| {
+            job.connection.as_deref() == Some(connection_id)
+                && matches!(job.view.state.as_str(), "choice" | "converting" | "sending")
+        })
+    }
+
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     pub async fn select(
         &self,
         _service: &Service,
@@ -175,6 +206,8 @@ impl Processing {
             return Err("Processing queue is full; dismiss finished entries".into());
         }
         jobs.push(Job {
+            #[cfg(not(target_os = "android"))]
+            connection: Some(selected.connection.clone()),
             view: View {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: selected.tree.name.clone(),
@@ -187,6 +220,8 @@ impl Processing {
             selection: Some(selected),
             cancel: Arc::new(CommitGate::default()),
         });
+        drop(jobs);
+        self.changed();
         Ok(true)
     }
 
@@ -220,6 +255,8 @@ impl Processing {
                 return Err("Processing queue full".into());
             }
             jobs.push(Job {
+                #[cfg(not(target_os = "android"))]
+                connection: None,
                 view: View {
                     id: id.clone(),
                     name: path
@@ -237,7 +274,10 @@ impl Processing {
                 cancel: cancel.clone(),
             });
         }
+        self.changed();
         let jobs = self.jobs.clone();
+        let notify = self.notify.clone();
+        let mut last = Instant::now();
         let current = id.clone();
         let worker_cancel = cancel.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -245,6 +285,12 @@ impl Processing {
                 if let Some(j) = lock(&jobs).iter_mut().find(|j| j.view.id == current) {
                     j.view.done = done;
                     j.view.total = total;
+                }
+                if last.elapsed() >= Duration::from_millis(250) {
+                    last = Instant::now();
+                    if let Some(notify) = &notify {
+                        notify();
+                    }
                 }
             })
         })
@@ -267,6 +313,7 @@ impl Processing {
                 }
             }
         }
+        self.changed();
         result.map(|_| ())
     }
     pub async fn decide(&self, service: &Service, id: String, convert: bool) -> Result<(), String> {
@@ -288,6 +335,7 @@ impl Processing {
             job.view.state = if convert { "converting" } else { "sending" }.into();
             (job.selection.take().ok_or_else(err)?, job.cancel.clone())
         };
+        self.changed();
         let result = async {
             let Some(binary) = binary else {
                 cancel.begin().map_err(|e| e.to_string())?;
@@ -318,6 +366,8 @@ impl Processing {
             let output_name = tree.name.clone();
             let shared_id = id.clone();
             let jobs = self.jobs.clone();
+            let notify = self.notify.clone();
+            let mut last = Instant::now();
             tokio::task::spawn_blocking(move || {
                 convert_tree(
                     &binary,
@@ -330,6 +380,12 @@ impl Processing {
                         if let Some(job) = lock(&jobs).iter_mut().find(|j| j.view.id == shared_id) {
                             job.view.done += 1;
                         }
+                        if last.elapsed() >= Duration::from_millis(250) {
+                            last = Instant::now();
+                            if let Some(notify) = &notify {
+                                notify();
+                            }
+                        }
                     },
                 )
             })
@@ -340,6 +396,7 @@ impl Processing {
             if let Some(job) = lock(&self.jobs).iter_mut().find(|j| j.view.id == id) {
                 job.view.state = "sending".into();
             }
+            self.changed();
             let stable = directory.keep().join(output_name);
             // Retain even on transport error: durable source tickets can reference this copy.
             send(service, selection, Some(stable)).await
@@ -359,6 +416,7 @@ impl Processing {
                 job.view.done = job.view.total;
             }
         }
+        self.changed();
         result
     }
 }

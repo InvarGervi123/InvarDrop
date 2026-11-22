@@ -1,8 +1,14 @@
 /// Public errors deliberately contain no keys, codes, packet contents or library dumps.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
+    #[error("Bluetooth is unavailable; enable Bluetooth sharing and scan again")]
+    BluetoothUnavailable,
+    #[error("Bluetooth connection timed out; check the peer and any OS pairing prompt")]
+    BluetoothTimeout,
+    #[error("Bluetooth RFCOMM connection failed ({0})")]
+    BluetoothConnect(String),
     #[error(
-        "Local network permission was not granted; discovery and secure connections are disabled"
+        "Local network permission was not granted; LAN discovery and LAN connections are disabled"
     )]
     NetworkPermission,
     #[error("Secure storage is unavailable; no insecure fallback is used")]
@@ -30,7 +36,7 @@ pub enum Error {
     #[error("TLS handshake failed; no authenticated connection was established")]
     TlsHandshake,
     #[error(
-        "TLS handshake timed out; the TCP connection succeeded but peer verification did not finish"
+        "TLS handshake timed out; the transport connected but peer verification did not finish"
     )]
     TlsTimeout,
     #[error("Peer authentication timed out after TLS; no secure session was established")]

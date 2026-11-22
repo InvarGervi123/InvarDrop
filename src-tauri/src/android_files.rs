@@ -43,7 +43,6 @@ mod mobile {
     };
     pub struct Picker {
         pub(crate) handle: PluginHandle<tauri::Wry>,
-        selection: tokio::sync::Mutex<()>,
     }
     pub fn init() -> TauriPlugin<tauri::Wry> {
         Builder::new("android-files")
@@ -52,10 +51,7 @@ mod mobile {
                     "io.github.invargervi.invardrop",
                     "FilePickerPlugin",
                 )?;
-                app.manage(Picker {
-                    handle,
-                    selection: tokio::sync::Mutex::new(()),
-                });
+                app.manage(Picker { handle });
                 Ok(())
             })
             .build()
@@ -86,19 +82,13 @@ mod mobile {
         directory: String,
         multiple: bool,
     }
-    pub async fn choose(picker: &Picker, service: &Service, id: &str) -> Result<(), String> {
-        let _guard = picker
-            .selection
-            .try_lock()
-            .map_err(|_| "A file selection is already in progress")?;
-        service.can_send_file(id).map_err(|e| e.to_string())?;
-        service.cleanup_prepared().await?;
+    pub async fn choose(
+        picker: &Picker,
+        service: &Service,
+        protected: Option<PathBuf>,
+    ) -> Result<Option<(Vec<PathBuf>, tempfile::TempDir)>, String> {
+        service.cleanup_prepared_except(protected).await?;
         let snapshot = service.snapshot();
-        let connection = snapshot
-            .connections
-            .iter()
-            .find(|c| c.id == id)
-            .ok_or("Connection is no longer available")?;
         let profile = Path::new(&snapshot.receive_directory)
             .parent()
             .ok_or("Invalid profile")?;
@@ -131,13 +121,13 @@ mod mobile {
                 "choose",
                 Request {
                     directory: directory.path().to_string_lossy().into_owned(),
-                    multiple: connection.supports_bundles,
+                    multiple: true,
                 },
             )
             .await
             .map_err(|e| e.to_string())?;
         if selected.names.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let paths = validate_imports(directory.path(), &selected.names)?;
         // Sync the directory before a durable checkpoint can reference the copy.
@@ -147,35 +137,7 @@ mod mobile {
         std::fs::File::open(&root)
             .and_then(|f| f.sync_all())
             .map_err(|_| "Cannot sync private storage")?;
-        service.can_send_file(id).map_err(|e| e.to_string())?;
-        // A transport error may still leave a durable source ticket. Keep copies
-        // until the catalog no longer references them; never delete on send error.
-        let _stable = directory.keep();
-        if paths.len() == 1 {
-            if connection.supports_resume {
-                service
-                    .send_resumable_file(id, &paths[0])
-                    .await
-                    .map_err(|e| e.to_string())
-            } else {
-                let source = secure::files::Source::open(&paths[0])
-                    .await
-                    .map_err(|e| e.to_string())?;
-                service.send_file(id, source).map_err(|e| e.to_string())
-            }
-        } else {
-            let source = secure::bundle::BundleSource::files(paths)
-                .await
-                .map_err(|e| e.to_string())?;
-            if connection.supports_resume {
-                service
-                    .send_resumable_bundle(id, source)
-                    .await
-                    .map_err(|e| e.to_string())
-            } else {
-                service.send_bundle(id, source).map_err(|e| e.to_string())
-            }
-        }
+        Ok(Some((paths, directory)))
     }
 }
 #[cfg(target_os = "android")]

@@ -46,7 +46,7 @@ it("does not reuse confirmation for a new request", () => {
   expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
   fireEvent.click(screen.getByText("Accept file")); expect(operate).not.toHaveBeenCalled();
 });
-describe.each([["receiving", "Transferring · receiving file…"], ["rejected", "Declined"], ["expired", "Request expired"], ["complete", "Completed · BLAKE3 verified"], ["error", "Transfer failed"]])("state %s", (status, label) => {
+describe.each([["receiving", "Receiving…"], ["rejected", "Declined"], ["expired", "Request expired"], ["complete", "Completed"], ["error", "Transfer failed"]])("state %s", (status, label) => {
   it("shows state and removes approval controls", () => {
     render(<FileTransfer connection={connection(status)} operate={vi.fn()} />);
     expect(screen.getByRole("status").textContent).toBe(label);
@@ -107,21 +107,9 @@ it("shows folder name, file count, total size and requires explicit folder appro
   fireEvent.click(screen.getByText("I want to save this folder")); fireEvent.click(accept); fireEvent.click(accept);
   await waitFor(()=>expect(operate).toHaveBeenCalledExactlyOnceWith("file_respond",{id:"connection",transferId:"one",accept:true}));
 });
-it("selects a folder through the native command and blocks duplicate picker actions", async () => {
-  const c=connection("complete"); let finish!:(ok:boolean)=>void;
-  const operate=vi.fn().mockImplementation(()=>new Promise<boolean>(resolve=>{finish=resolve;}));
-  render(<FileTransfer connection={c} operate={operate}/>); fireEvent.click(screen.getByText("Choose a folder to send"));fireEvent.click(screen.getByText("Choose files to send"));
-  expect(operate).toHaveBeenCalledExactlyOnceWith("folder_choose",{id:"connection"});finish(true);
-  await waitFor(()=>expect((screen.getByText("Choose files to send") as HTMLButtonElement).disabled).toBe(false));
-});
-it("hides folder selection for a legacy peer and during an active operation", () => {
-  const c=connection("complete"); c.supportsBundles=false; const view=render(<FileTransfer connection={c} operate={vi.fn()}/>);
-  expect(screen.queryByText("Choose a folder to send")).toBeNull();expect(screen.getByText("Choose a file to send")).toBeTruthy();
-  c.supportsBundles=true;c.transfer!.status="receiving"; view.rerender(<FileTransfer connection={c} operate={vi.fn()}/>);expect(screen.queryByText("Choose a folder to send")).toBeNull();
-});
 it("handles empty folder completion and formats the 64-bit size limit",()=>{
   const c=connection("complete");c.transfer!.isFolder=true;c.transfer!.fileCount=0;c.transfer!.size=0;
-  render(<FileTransfer connection={c} operate={vi.fn()}/>);expect(screen.getByText("0 B · 0 files · folder · Incoming")).toBeTruthy();expect((screen.getByRole("progressbar") as HTMLProgressElement).value).toBe(100);expect(formatBytes(1024**4)).toBe("1 TiB");
+  render(<FileTransfer connection={c} operate={vi.fn()}/>);expect(screen.getByText("0 B · 0 files · folder · Incoming")).toBeTruthy();expect(progressPercent(c.transfer!)).toBe(100);expect(formatBytes(1024**4)).toBe("1 TiB");
 });
 it("declines a folder without approval and cancels the entire active operation", async()=>{
   const c=connection();c.transfer!.isFolder=true;c.transfer!.fileCount=3;const operate=vi.fn().mockResolvedValue(true);const view=render(<FileTransfer connection={c} operate={operate}/>);
@@ -183,7 +171,7 @@ it("hides stale speed and ETA after a transfer has finished", () => {
   const c = connection("complete"); c.transfer!.bytesPerSecond = 2 * 1024 ** 2; c.transfer!.etaSeconds = 90;
   render(<FileTransfer connection={c} operate={vi.fn()} />);
   expect(screen.queryByText(/ETA/)).toBeNull(); expect(screen.queryByText(/2.00 MiB/)).toBeNull();
-  expect(screen.getByText("Speed —")).toBeTruthy();
+  expect(screen.queryByRole("progressbar")).toBeNull();
 });
 
 it("shows the public Downloads destination while preserving the private ZIP processing path", () => {

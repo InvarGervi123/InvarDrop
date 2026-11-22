@@ -5,7 +5,7 @@ describe("connection-stage recovery guidance", () => {
   it.each([
     ["TCP connection timed out; check the advertised port, network and firewall rules", "receiving interface/source"],
     ["TCP access denied by this device; check local-network permissions or VPN policy", "local-network permission"],
-    ["TLS handshake failed; no authenticated connection was established", "TCP reached the peer"],
+    ["TLS handshake failed; no authenticated connection was established", "transport reached the peer"],
     ["TLS identity verification failed", "Do not bypass certificate checks"],
     ["Pairing expired; compare fresh codes on both devices before approving", "every code group"],
   ])("explains %s without suggesting insecure fallback", (message, hint) => {

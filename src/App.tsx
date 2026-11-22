@@ -1,57 +1,102 @@
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 import { useDiscovery } from "./useDiscovery";
 import { useSecurity } from "./useSecurity";
-import { ResumeTransfers } from "./ResumeTransfers";
-import { PairCard } from "./PairCard";
+import { nearbyDevices, useBluetooth, useBluetoothDiscovery } from "./useBluetooth";
+import { NearbyDevices, deviceIcon } from "./NearbyDevices";
+import { SendAction, ShareComposer } from "./ShareComposer";
+import { Attention, TransferActivity, transferActive } from "./Activity";
 import { ProcessingPanel } from "./ProcessingPanel";
-import { TrustSettings } from "./TrustSettings";
-import { ErrorNotice } from "./ErrorNotice";
+import { Settings } from "./Settings";
+import { friendlyError } from "./ErrorNotice";
 import { Icon } from "./Icon";
+import { failureText, useShare } from "./useShare";
 
 function App() {
   const { snapshot, bridgeError } = useDiscovery();
   const { snapshot: security, bridgeError: securityBridgeError } = useSecurity();
+  const bluetooth = useBluetooth();
+  const [settings, setSettings] = useState(false);
+  const [bluetoothAllowed, setBluetoothAllowed] = useState(() => localStorage.getItem("bluetooth-sharing") !== "off");
+  const [offerConversion, setOfferConversion] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
   const [pending, setPending] = useState(0);
   const operations = useRef(new Set<string>());
-  const devices = snapshot?.devices ?? [];
-  const unavailable = bridgeError || snapshot?.status === "unavailable" || snapshot?.status === "stopped";
+  const report = useCallback((message: string | null) => {
+    setError(message);
+    if (message) setLastError(message);
+  }, []);
+  const connections = security?.connections ?? [];
+  const share = useShare(connections, report);
+  const devices = nearbyDevices(snapshot?.devices ?? [], bluetooth?.devices ?? []);
+  const canFindMore = bluetooth?.supported === true && bluetoothAllowed;
+  const bluetoothActive = bluetoothAllowed && ["starting", "ready", "scanning", "paused"].includes(bluetooth?.status ?? "");
+  const lanUnavailable = bridgeError || snapshot?.status === "unavailable" || snapshot?.status === "stopped";
+  const unavailable = lanUnavailable && !bluetoothActive;
   const ready = security?.status === "ready" && !securityBridgeError;
-  const active = security?.connections.filter(c => c.phase !== "closed") ?? [];
-  const visibleConnections = active.length ? active.slice().reverse() : security?.connections.slice(-1) ?? [];
-  const operate = async (command: string, args: Record<string, unknown>) => {
-    const key = `${command}:${args.id ?? args.transferId ?? args.connectionId ?? ""}`;
+  const canReceive = snapshot?.status === "searching" || ["ready", "scanning"].includes(bluetooth?.status ?? "");
+  const folders = snapshot?.supportsFolderPicker ?? false;
+  const idle = !share.intent && !share.picking && !connections.some(connection =>
+    ["connecting", "verifying", "committing"].includes(connection.phase) || transferActive(connection.transfer));
+  useBluetoothDiscovery(bluetooth, bluetoothAllowed, idle, Boolean(snapshot?.devices.some(device => device.canConnect)));
+
+  const operate = async (command: string, args: Record<string, unknown>, done?: (value: unknown) => void) => {
+    const key = [command, args.id ?? "", args.transferId ?? ""].join(":");
     if (operations.current.has(key)) return false;
-    operations.current.add(key); setPending(count => count + 1); setError(null);
-    try { await invoke(command, args); return true; }
-    catch (failure) { setError(typeof failure === "string" ? failure : "Operation failed. Try again."); return false; }
+    operations.current.add(key);
+    setPending(count => count + 1);
+    report(null);
+    try { const result = await invoke(command, args); done?.(result); return true; }
+    catch (failure) { report(failureText(failure)); return false; }
     finally { operations.current.delete(key); setPending(count => count - 1); }
   };
+  const setBluetooth = (enabled: boolean) => {
+    setBluetoothAllowed(enabled);
+    localStorage.setItem("bluetooth-sharing", enabled ? "on" : "off");
+    void operate(enabled ? "bluetooth_enable" : "bluetooth_disable", {});
+  };
+  const openSettings = () => {
+    setSettings(show => !show);
+    document.documentElement.scrollTop = 0;
+  };
+  const coreError = securityBridgeError ? "Open the installed InvarDrop app to share files." :
+    security?.status === "unavailable" && security.error ? friendlyError(security.error) : null;
+
   return <main className="app">
-    <header className="app-header"><span className="mark" aria-hidden="true">↓</span><div><h1>InvarDrop</h1><p>Private sharing, nearby.</p></div><span className="offline-label">LAN only</span></header>
-    <div className="workspace" tabIndex={0} role="region" aria-label="Devices and transfers">
-      {security?.status === "starting" && <p className="service-status" role="status">Opening protected device identity…</p>}
-      {(securityBridgeError || security?.error) && <ErrorNotice message={security?.error ?? "Open the desktop app to use secure connections."} />}
-      {error && <ErrorNotice message={error} />}
-      {visibleConnections.map(c => <PairCard key={c.id} connection={c} operate={operate} />)}
-      {security && <ResumeTransfers snapshot={security} operate={operate} />}
-      <section aria-labelledby="devices-title" className="empty-state">
-        <div className="section-heading"><h2 id="devices-title"><Icon name="device" />Nearby devices</h2><span className="status" role="status">{unavailable ? "Unavailable" : snapshot?.status === "searching" ? "Discovering" : "Starting…"}</span></div>
-        {unavailable ? <p className="discovery-message">{bridgeError ? "Open the desktop app to discover devices." : "Local discovery is unavailable. Retrying automatically. Check your local network and firewall if it persists."}</p> : devices.length ? <>
-          <ul className="device-list" aria-label="Nearby InvarDrop devices">{devices.map(device => <li key={device.id}>
-            <Icon name="device" /><div className="device-copy"><span className="device-name" dir="auto">{device.name}</span><span className="device-trust">Unverified name</span></div>
-            <button type="button" aria-label={`${device.canConnect ? "Connect to" : "Discovery only:"} ${device.name}`} disabled={!ready || !device.canConnect || pending > 0} onClick={() => void operate("secure_connect", { id: device.id })}>{device.canConnect ? "Connect" : "Discovery only"}</button>
-          </li>)}</ul><p className="file-hint">Names are unverified. Saved keys are checked when you connect.</p>
-        </> : !snapshot || snapshot.status === "starting" ? <div className="discovery-empty"><p>Starting local discovery…</p><p className="file-hint">Preparing the nearby device list.</p></div> : <div className="discovery-empty"><p>No devices found yet</p><p className="file-hint">Open InvarDrop on another device on the same local network. Devices appear automatically.</p></div>}
-        <p className="local-name">{snapshot ? <>This device: <span dir="auto">{snapshot.localDevice.name}</span></> : "Preparing local discovery…"}</p>
-      </section>
-      <ProcessingPanel />
-      {security?.receiveDirectory && <p className="receive-directory">Destination: Downloads/InvarDrop · Saved only after approval and verification</p>}
-      {security && <TrustSettings snapshot={security} operate={operate} busy={pending > 0} />}
+    <header className="app-header">
+      <div className="brand"><span className="brand-mark"><Icon name="brand" /></span><span>InvarDrop</span></div>
+      <button className="header-button quiet" type="button" onClick={openSettings}><Icon name={settings ? "back" : "settings"} />{settings ? "Back to sharing" : "Settings"}</button>
+    </header>
+    <div className="page">
+      <header className="intro">
+        {settings ? <><h1>Settings</h1><p>Discovery, trusted devices, and transfer recovery.</p></> :
+          <><h1>Share nearby</h1><p>Pick files and a nearby device to send them to.</p></>}
+      </header>
+      {(coreError || error) && <div className="operation-error" role="alert">
+        <Icon name="alert" /><p>{error ? friendlyError(error) : coreError}</p>
+        {error && <button type="button" className="icon-button quiet" aria-label="Dismiss message" onClick={() => report(null)}><Icon name="close" /></button>}
+      </div>}
+      <Attention connections={connections} recipients={share.recipients} pendingId={share.intent?.connectionId} cancel={() => void share.cancel()} operate={operate} />
+      {settings ? <Settings security={security} devices={devices} bluetooth={bluetooth} bluetoothAllowed={bluetoothAllowed} fileOptions={folders}
+        offerConversion={offerConversion} setOfferConversion={setOfferConversion} lan={snapshot?.status ?? "unknown"}
+        lastError={lastError} busy={pending > 0} operate={operate} onBluetooth={setBluetooth} /> : <div className="share-grid">
+        <ShareComposer share={share} ready={ready} folders={folders} />
+        <NearbyDevices devices={devices} selected={share.device} disabled={Boolean(share.intent) || pending > 0}
+          starting={!bridgeError && (!snapshot || snapshot.status === "starting") && devices.length === 0}
+          unavailable={Boolean(unavailable)} bluetoothAction={canFindMore && (!bluetoothActive || devices.length === 0) && bluetooth?.status !== "scanning"}
+          onSelect={share.selectDevice} findMore={() => bluetoothActive ? void operate("bluetooth_scan", {}) : setBluetooth(true)} />
+        <SendAction share={share} ready={ready} offerConversion={offerConversion}
+          available={devices.some(device => device.id === share.device?.id && device.canConnect)} />
+      </div>}
+      <TransferActivity connections={connections} recipients={share.recipients} operate={operate} />
+      <ProcessingPanel settingsOpen={settings && folders} />
+      <footer className="app-footer">
+        <div className="local-device"><Icon name={deviceIcon(snapshot?.localDevice.name ?? "")} /><div><span>This device</span><strong dir="auto">{snapshot?.localDevice.name ?? "Getting ready…"}</strong></div></div>
+        <p><Icon name="shield" />{ready && canReceive ? "Ready to receive" : "Local sharing"}</p>
+      </footer>
     </div>
-    <footer>Offline &amp; account-free · By Invar Gervi</footer>
   </main>;
 }
 export default App;

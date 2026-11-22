@@ -6,6 +6,7 @@ export interface Device { id: string; name: string; canConnect: boolean }
 interface Snapshot {
   revision: number;
   localDevice: Device;
+  supportsFolderPicker: boolean;
   status: "starting" | "searching" | "unavailable" | "stopped";
   devices: Device[];
 }

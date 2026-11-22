@@ -106,7 +106,14 @@ fn frame_limit(message: &Message) -> usize {
     }
 }
 pub async fn send<W: AsyncWrite + Unpin>(stream: &mut W, message: &Message) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(20), send_frame(stream, message))
+    send_with_timeout(stream, message, Duration::from_secs(20)).await
+}
+pub(super) async fn send_with_timeout<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    message: &Message,
+    budget: Duration,
+) -> Result<()> {
+    tokio::time::timeout(budget, send_frame(stream, message))
         .await
         .map_err(|_| Error::Expired)?
 }

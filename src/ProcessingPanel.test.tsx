@@ -4,6 +4,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { invoke } from "@tauri-apps/api/core";
 import { ProcessingPanel } from "./ProcessingPanel";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), isTauri: () => true }));
+let onChange: () => void;
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (_name: string, callback: () => void) => {
+  onChange = callback;
+  return () => {};
+}) }));
 const call = vi.mocked(invoke);
 const job = (state = "choice") => ({ id: "job", name: "song.ogg", state, done: 0, total: 1, error: null, path: null });
 beforeEach(() => { call.mockImplementation(async command => command === "processing_snapshot" ? [job()] : command === "processing_converter_status" ? true : undefined); });
@@ -58,16 +63,17 @@ it("keeps an acknowledged decision disabled until the backend snapshot advances"
   fireEvent.click(screen.getByText("Keep originals")); fireEvent.click(screen.getByText("Convert OGG to MP3"));
   expect(call.mock.calls.filter(([c]) => c === "processing_decide")).toHaveLength(1);
 });
-it("reports polling failure and retries without overlapping slow requests", async () => {
+it("reports an unavailable processing snapshot", async () => {
   call.mockImplementation(async command => { if (command === "processing_snapshot") throw new Error("Offline"); return false; });
-  render(<ProcessingPanel />); expect((await screen.findByRole("alert")).textContent).toContain("Retrying automatically");
+  render(<ProcessingPanel />); expect((await screen.findByRole("alert")).textContent).toContain("Could not update file preparation status");
 });
-it("does not enqueue polling while a snapshot request is unresolved", async () => {
+it("coalesces updates while a snapshot request is unresolved", async () => {
   vi.useFakeTimers(); let resolve!: (value: never[]) => void;
   call.mockImplementation(command => command === "processing_snapshot" ? new Promise(done => { resolve = done; }) : Promise.resolve(false));
   render(<ProcessingPanel />); await act(async () => { vi.advanceTimersByTime(5000); });
+  await act(async () => { onChange(); onChange(); });
   expect(call.mock.calls.filter(([c]) => c === "processing_snapshot")).toHaveLength(1);
-  await act(async () => { resolve([]); }); await act(async () => { vi.advanceTimersByTime(500); });
+  await act(async () => { resolve([]); });
   expect(call.mock.calls.filter(([c]) => c === "processing_snapshot")).toHaveLength(2);
 });
 it("dismisses only a finished result and explains that saved data stays", async () => {
@@ -82,9 +88,9 @@ it("reveals a newly requested processing stage without stealing focus or scrolli
   render(<ProcessingPanel />); await act(async () => {});
   const panel = screen.getByRole("region", { name: "Optional file processing" });
   panel.scrollIntoView = vi.fn(); const originalFocus = document.activeElement;
-  jobs = [job()]; await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+  jobs = [job()]; await act(async () => { onChange(); });
   expect(panel.scrollIntoView).toHaveBeenCalledExactlyOnceWith({ block: "nearest" });
   expect(document.activeElement).toBe(originalFocus);
-  jobs = [{ ...job("converting"), done: 1 }]; await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+  jobs = [{ ...job("converting"), done: 1 }]; await act(async () => { onChange(); });
   expect(panel.scrollIntoView).toHaveBeenCalledTimes(1);
 });

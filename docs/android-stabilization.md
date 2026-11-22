@@ -1,5 +1,27 @@
 # Milestone 15: Android stabilization and verification
 
+## Current Bluetooth follow-up
+
+The subsequent, uncommitted Bluetooth implementation adds Linux BlueZ and Android
+BLE/GATT discovery and RFCOMM backends alongside LAN. The previous APK failed
+during Bluetooth startup on the Galaxy S25 with `BLUETOOTH_SCAN`,
+`BLUETOOTH_ADVERTISE` and `BLUETOOTH_CONNECT` granted. Android rejected the
+five-field bootstrap because its validator required six fields. The validator
+has been corrected and stage-specific logging added. The user confirmed
+Bluetooth startup and discovery on the Galaxy S25. The subsequent Android-to-Linux
+RFCOMM connection failed. The BlueZ listener fix awaits an end-to-end retry.
+
+See [Bluetooth status, architecture, automated results and remaining physical
+tests](bluetooth.md). Successful Android/Linux transfers recorded below refer to
+LAN and Downloads saving. They do not verify Bluetooth discovery, RFCOMM, TLS over
+Bluetooth, or Bluetooth file transfers.
+
+The remaining sections describe the earlier Android stabilization milestone and
+its explicitly identified artifacts. Statements that no Bluetooth permissions
+were added apply to that historical milestone/APK, not the current Bluetooth
+working tree. Its earlier CI results also do not validate the current uncommitted
+Bluetooth changes on Windows.
+
 ## Status and evidence
 
 The Android milestone (`c565862`) and Windows follow-up (`5b3883e`) are committed

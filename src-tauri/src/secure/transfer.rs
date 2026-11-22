@@ -250,16 +250,28 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
     messages: &mut mpsc::Receiver<Result<Message>>,
     mut actions: mpsc::Receiver<Action>,
 ) -> Result<()> {
-    let (idle, wake) = {
+    let (idle, wake, idle_timeout) = {
         let state = lock(&s.state);
         let entry = state
             .entries
             .iter()
             .find(|e| e.view.id == connection)
             .ok_or(Error::NotReady)?;
-        (entry.frame_idle.clone(), entry.progress_wake.clone())
+        (
+            entry.frame_idle.clone(),
+            entry.progress_wake.clone(),
+            Duration::from_secs(if entry.view.transport == "bluetooth" {
+                120
+            } else {
+                20
+            }),
+        )
     };
-    let mut framed = TrackedWriter { writer, idle };
+    let mut framed = TrackedWriter {
+        writer,
+        idle,
+        idle_timeout,
+    };
     let _progress_task = AbortTask(tokio::spawn(progress::run(
         s.clone(),
         connection.to_owned(),
@@ -278,7 +290,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
     let mut seen_offers = HashSet::new();
     loop {
         transfer.check_deadline()?;
-        if last_received.elapsed() >= Duration::from_secs(20) {
+        if last_received.elapsed() >= idle_timeout {
             return Err(Error::Expired);
         }
         if !store_lock(&store)?.is_trusted(peer) {
@@ -289,7 +301,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
         let deadline = transfer.deadline();
         tokio::select! {
             _=tick.tick()=>framed.send(&Message::Ping{}).await?,
-            _=tokio::time::sleep_until((last_received+Duration::from_secs(20)).into())=>return Err(Error::Expired),
+            _=tokio::time::sleep_until((last_received+idle_timeout).into())=>return Err(Error::Expired),
             _=tokio::time::sleep_until(deadline.unwrap_or_else(|| Instant::now()+s.file_approval_duration).into()), if deadline.is_some()=>return Err(Error::Expired),
             // Select readiness, then await a whole read/write. Selecting directly
             // on next_chunk would let keepalives cancel a partially completed read.
@@ -367,7 +379,7 @@ pub(super) async fn run<W: tokio::io::AsyncWrite + Unpin>(
             }
             message=next(messages)=>{
                 transfer.check_deadline()?;
-                if last_received.elapsed() >= Duration::from_secs(20) {return Err(Error::Expired);}
+                if last_received.elapsed() >= idle_timeout {return Err(Error::Expired);}
                 let message=message?;
                 last_received=Instant::now();
                 if !matches!(message,Message::FileChunk{..}|Message::BundleFileEnd{..}|Message::ResumeCheckpoint{..}|Message::ResumeAck{..}|Message::ResumeFileEnd{..}) {
@@ -532,11 +544,12 @@ fn validate_sender(name: &str) -> Result<()> {
 struct TrackedWriter<'a, W> {
     writer: &'a mut W,
     idle: Arc<std::sync::atomic::AtomicBool>,
+    idle_timeout: Duration,
 }
 impl<W: tokio::io::AsyncWrite + Unpin> TrackedWriter<'_, W> {
     async fn send(&mut self, message: &Message) -> Result<()> {
         self.idle.store(false, Ordering::SeqCst);
-        let result = protocol::send(self.writer, message).await;
+        let result = protocol::send_with_timeout(self.writer, message, self.idle_timeout).await;
         if result.is_ok() {
             self.idle.store(true, Ordering::SeqCst);
         }
@@ -571,7 +584,7 @@ async fn wait_finalization<W: tokio::io::AsyncWrite + Unpin>(
         tokio::select! {
             finished=&mut result=>return finished.map_err(|_|Error::FileIo)?,
             _=&mut deadline=>return Err(Error::Expired),
-            _=tokio::time::sleep_until((*last_received+Duration::from_secs(20)).into())=>return Err(Error::Expired),
+            _=tokio::time::sleep_until((*last_received+framed.idle_timeout).into())=>return Err(Error::Expired),
             _=tick.tick()=>framed.send(&Message::Ping{}).await?,
             message=next(messages)=>{
                 if window.elapsed()>=Duration::from_secs(60){*window=Instant::now();*controls=0;}

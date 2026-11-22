@@ -687,7 +687,7 @@ async fn wait_result<T: Send + 'static, W: tokio::io::AsyncWrite + Unpin>(
         tokio::select! {
             result=&mut result=>return result.map_err(|_|Error::FileIo)?,
             _=&mut deadline=>return Err(Error::Expired),
-            _=tokio::time::sleep_until((last+Duration::from_secs(20)).into())=>return Err(Error::Expired),
+            _=tokio::time::sleep_until((last+framed.idle_timeout).into())=>return Err(Error::Expired),
             _=tick.tick()=>framed.send(&Message::Ping{}).await?,
             message=next(messages)=>{
                 if window.elapsed()>=Duration::from_secs(60){window=Instant::now();controls=0;}

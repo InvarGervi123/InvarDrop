@@ -28,6 +28,10 @@ test-results/
 *.key
 *.p12
 *.pfx
+*.jks
+*.keystore
+*.pk8
+keystore.properties
 
 # Encrypted security state is local-only too
 identity.enc

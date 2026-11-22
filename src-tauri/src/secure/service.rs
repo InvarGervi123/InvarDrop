@@ -88,6 +88,7 @@ pub struct Connection {
     pub supports_resume: bool,
     pub error: Option<String>,
     pub transfer: Option<TransferView>,
+    pub transport: String,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -138,6 +139,7 @@ struct State {
     entries: VecDeque<Entry>,
 }
 struct Shared {
+    bluetooth: Mutex<Option<Arc<crate::bluetooth::Controller>>>,
     state: Mutex<State>,
     store: Mutex<Option<SharedStore>>,
     catalog: Mutex<Option<Arc<resume::Catalog>>>,
@@ -209,8 +211,13 @@ impl Service {
                         return;
                     }
                     if let Err(e) = listen(s.clone(), Arc::new(Mutex::new(store))).await {
+                        let lan_only = matches!(
+                            e,
+                            Error::NetworkPermission | Error::ListenBind | Error::Network
+                        ) && lock(&s.store).is_some();
                         update(&s, |st| {
-                            st.snapshot.status = "unavailable".into();
+                            st.snapshot.status =
+                                if lan_only { "ready" } else { "unavailable" }.into();
                             st.snapshot.error = Some(e.to_string());
                         });
                     }
@@ -233,6 +240,55 @@ impl Service {
     }
     pub fn snapshot(&self) -> Snapshot {
         lock(&self.shared.state).snapshot.clone()
+    }
+    pub(crate) fn attach_bluetooth(&self, bluetooth: Arc<crate::bluetooth::Controller>) {
+        let Some(mut incoming) = bluetooth.take_incoming() else {
+            return;
+        };
+        *lock(&self.shared.bluetooth) = Some(bluetooth);
+        let shared = self.shared.clone();
+        let mut stop = shared.stop.subscribe();
+        let task = tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.changed() => break,
+                    stream = incoming.recv() => match stream {
+                        Some(stream) => { let _ = spawn_connection(&shared, Input::Stream(stream.stream), None); }
+                        None => break,
+                    }
+                }
+            }
+        });
+        let tauri::async_runtime::JoinHandle::Tokio(task) = task;
+        lock(&self.shared.tasks).push(task);
+    }
+    pub(crate) fn connect_nearby(
+        &self,
+        contact: String,
+        endpoints: Vec<SocketAddr>,
+    ) -> Result<String> {
+        let connected = lock(&self.shared.state)
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.contact.as_ref() == Some(&contact)
+                    && entry.view.phase == "connected"
+                    && !*entry.cancel.borrow()
+            })
+            .map(|entry| entry.view.id.clone());
+        match connected {
+            Some(id) => Ok(id),
+            None => self.connect(contact, endpoints),
+        }
+    }
+    pub(crate) fn disconnect_bluetooth(&self) {
+        for entry in &lock(&self.shared.state).entries {
+            if entry.view.transport == "bluetooth" {
+                let _ = entry.gate.cancel();
+                let _ = entry.cancel.send(true);
+            }
+        }
     }
     pub fn connect(&self, contact: String, endpoints: Vec<SocketAddr>) -> Result<String> {
         let expected = {
@@ -262,7 +318,7 @@ impl Service {
                 return Err(Error::NotReady);
             }
             (
-                entry.target.ok_or(Error::NotReady)?,
+                entry.target,
                 entry.view.peer.clone().ok_or(Error::Identity)?,
                 entry.contact.clone(),
             )
@@ -273,7 +329,7 @@ impl Service {
         }
         spawn_connection(
             &self.shared,
-            Input::Outgoing(vec![target], Some(peer)),
+            Input::Outgoing(target.into_iter().collect(), Some(peer)),
             contact,
         )
     }
@@ -400,6 +456,12 @@ impl Service {
         })
     }
     pub(crate) async fn cleanup_prepared(&self) -> std::result::Result<(), String> {
+        self.cleanup_prepared_except(None).await
+    }
+    pub(crate) async fn cleanup_prepared_except(
+        &self,
+        protected: Option<std::path::PathBuf>,
+    ) -> std::result::Result<(), String> {
         // Legacy streams have no durable source ticket; keep their lazy-open files alive.
         if self
             .snapshot()
@@ -435,7 +497,9 @@ impl Service {
             {
                 let entry = entry.map_err(|_| "Prepared storage unavailable")?;
                 let path = entry.path();
-                if (entry.file_name().to_string_lossy().starts_with("audio-")
+                if !protected.as_ref().is_some_and(|protected| {
+                    path.canonicalize().is_ok_and(|path| &path == protected)
+                }) && (entry.file_name().to_string_lossy().starts_with("audio-")
                     || entry
                         .file_name()
                         .to_string_lossy()
@@ -683,6 +747,7 @@ fn make_shared(
 ) -> Arc<Shared> {
     let (stop, _) = watch::channel(false);
     Arc::new(Shared {
+        bluetooth: Mutex::new(None),
         state: Mutex::new(State {
             snapshot: Snapshot {
                 revision: 0,
@@ -809,6 +874,25 @@ fn listener_socket(port: u16) -> Result<std::net::TcpListener> {
 }
 
 async fn listen(s: Arc<Shared>, store: SharedStore) -> Result<()> {
+    let identity = store_lock(&store)?.identity().fingerprint()?;
+    let profile = s
+        .receive_directory
+        .parent()
+        .ok_or(Error::Storage)?
+        .to_owned();
+    let resume_store = store.clone();
+    let catalog = tokio::task::spawn_blocking(move || resume::Catalog::new(profile, resume_store))
+        .await
+        .map_err(|_| Error::Storage)??;
+    *lock(&s.catalog) = Some(Arc::new(catalog));
+    *lock(&s.store) = Some(store);
+    refresh_trust(&s)?;
+    refresh_resumable(&s).await?;
+    update(&s, |st| {
+        st.snapshot.identity = Some(identity);
+        st.snapshot.status = "ready".into();
+        st.snapshot.error = None;
+    });
     let mut stop = s.stop.subscribe();
     #[cfg(target_os = "android")]
     while !crate::network_permission::NETWORK.allowed() {
@@ -829,26 +913,7 @@ async fn listen(s: Arc<Shared>, store: SharedStore) -> Result<()> {
     let listener =
         TcpListener::from_std(listener_socket(s.listen_port)?).map_err(|_| Error::ListenBind)?;
     let port = listener.local_addr().map_err(|_| Error::Network)?.port();
-    let identity = store_lock(&store)?.identity().fingerprint()?;
-    let profile = s
-        .receive_directory
-        .parent()
-        .ok_or(Error::Storage)?
-        .to_owned();
-    let resume_store = store.clone();
-    let catalog = tokio::task::spawn_blocking(move || resume::Catalog::new(profile, resume_store))
-        .await
-        .map_err(|_| Error::Storage)??;
-    *lock(&s.catalog) = Some(Arc::new(catalog));
-    *lock(&s.store) = Some(store);
-    refresh_trust(&s)?;
-    refresh_resumable(&s).await?;
     s.port.store(port, Ordering::Release);
-    update(&s, |st| {
-        st.snapshot.identity = Some(identity);
-        st.snapshot.status = "ready".into();
-        st.snapshot.error = None;
-    });
     loop {
         tokio::select! {
             _=stop.changed()=>return Ok(()),
@@ -862,6 +927,7 @@ async fn listen(s: Arc<Shared>, store: SharedStore) -> Result<()> {
 enum Input {
     Incoming(TcpStream),
     Outgoing(Vec<SocketAddr>, Option<String>),
+    Stream(super::stream::Stream),
 }
 enum Action {
     Resume {
@@ -881,7 +947,7 @@ enum Action {
     },
 }
 fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> Result<String> {
-    if *s.stop.borrow() || s.port.load(Ordering::Acquire) == 0 {
+    if *s.stop.borrow() || lock(&s.store).is_none() {
         return Err(Error::NotReady);
     }
     {
@@ -920,6 +986,7 @@ fn spawn_connection(s: &Arc<Shared>, input: Input, contact: Option<String>) -> R
                 supports_resume: false,
                 error: None,
                 transfer: None,
+                transport: "lan".into(),
             },
             contact,
             target: None,
@@ -997,34 +1064,102 @@ async fn connection(
     let store = get_store(&s)?;
     let initiator = matches!(&input, Input::Outgoing(..));
     let mut target = None;
+    let mut is_bluetooth = matches!(&input, Input::Stream(_));
+    let contact = {
+        let state = lock(&s.state);
+        state
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .and_then(|e| e.contact.clone())
+    };
+    let bluetooth = lock(&s.bluetooth).clone();
+    let can_fallback = contact.as_ref().is_some_and(|id| {
+        bluetooth
+            .as_ref()
+            .is_some_and(|bt| bt.has_peer(id) || bt.can_discover())
+    });
     let tls_started = std::sync::atomic::AtomicBool::new(false);
     let handshake = async {
-        let stream = match input {
+        match input {
             Input::Incoming(tcp) => {
                 tls_started.store(true, Ordering::Relaxed);
                 let acceptor = { transport::acceptor(store_lock(&store)?.identity())? };
-                TlsStream::Server(acceptor.accept(tcp).await.map_err(connect::tls_error)?)
+                let io: super::stream::Stream = Box::new(tcp);
+                Ok(TlsStream::Server(
+                    acceptor.accept(io).await.map_err(connect::tls_error)?,
+                ))
+            }
+            Input::Stream(io) => {
+                tls_started.store(true, Ordering::Relaxed);
+                view(&s, id, |e| e.view.transport = "bluetooth".into());
+                let acceptor = { transport::acceptor(store_lock(&store)?.identity())? };
+                Ok(TlsStream::Server(
+                    acceptor.accept(io).await.map_err(connect::tls_error)?,
+                ))
             }
             Input::Outgoing(addresses, expected) => {
-                let connector = { transport::connector(store_lock(&store)?.identity(), expected)? };
-                let (socket, address) = connect::tcp(addresses).await?;
-                target = Some(address);
-                tls_started.store(true, Ordering::Relaxed);
-                TlsStream::Client(
-                    connector
+                let lan = async {
+                    let connector =
+                        { transport::connector(store_lock(&store)?.identity(), expected.clone())? };
+                    let (socket, address) = connect::tcp(addresses).await?;
+                    tls_started.store(true, Ordering::Relaxed);
+                    let io: super::stream::Stream = Box::new(socket);
+                    let tls = connector
                         .connect(
-                            rustls::pki_types::ServerName::try_from("invardrop.local")
-                                .map_err(|_| Error::Identity)?,
-                            socket,
+                            "invardrop.local".try_into().map_err(|_| Error::Identity)?,
+                            io,
                         )
                         .await
-                        .map_err(connect::tls_error)?,
-                )
+                        .map_err(connect::tls_error)?;
+                    Ok((TlsStream::Client(tls), address))
+                };
+                let lan = timeout(HANDSHAKE, lan).await.unwrap_or_else(|_| {
+                    Err(if tls_started.load(Ordering::Relaxed) {
+                        Error::TlsTimeout
+                    } else {
+                        Error::TcpTimeout
+                    })
+                });
+                match lan {
+                    Ok((tls, address)) => {
+                        target = Some(address);
+                        Ok(tls)
+                    }
+                    Err(error) if can_fallback && connect::allows_fallback(&error) => {
+                        let bluetooth = bluetooth.as_ref().ok_or(Error::BluetoothUnavailable)?;
+                        let contact = contact.as_deref().ok_or(Error::NoEndpoint)?;
+                        if !bluetooth.find_peer(contact).await {
+                            return Err(error);
+                        }
+                        is_bluetooth = true;
+                        view(&s, id, |e| e.view.transport = "bluetooth".into());
+                        let io = bluetooth.connect(contact).await?;
+                        let connector =
+                            { transport::connector(store_lock(&store)?.identity(), expected)? };
+                        timeout(
+                            HANDSHAKE,
+                            connector.connect(
+                                "invardrop.local".try_into().map_err(|_| Error::Identity)?,
+                                io,
+                            ),
+                        )
+                        .await
+                        .map_err(|_| Error::TlsTimeout)?
+                        .map(TlsStream::Client)
+                        .map_err(connect::tls_error)
+                    }
+                    Err(error) => Err(error),
+                }
             }
-        };
-        Ok(stream)
+        }
     };
-    let mut stream = tokio::select! {r=timeout(HANDSHAKE,handshake)=>r.map_err(|_|if tls_started.load(Ordering::Relaxed) { Error::TlsTimeout } else { Error::TcpTimeout })??,_=cancel.changed()=>return Err(Error::Cancelled),_=stop.changed()=>return Err(Error::Cancelled)};
+    let budget = if can_fallback {
+        Duration::from_secs(65)
+    } else {
+        HANDSHAKE
+    };
+    let mut stream = tokio::select! {r=timeout(budget,handshake)=>r.map_err(|_|if tls_started.load(Ordering::Relaxed) { Error::TlsTimeout } else { Error::TcpTimeout })??,_=cancel.changed()=>return Err(Error::Cancelled),_=stop.changed()=>return Err(Error::Cancelled)};
     #[cfg(debug_assertions)]
     eprintln!("InvarDrop TLS handshake completed; checking peer identity and trust");
     let local = store_lock(&store)?.identity().fingerprint()?;
@@ -1073,6 +1208,7 @@ async fn connection(
         e.view.supports_bundles = version >= 5;
         e.view.supports_resume = version >= 6;
         e.target = target;
+        e.view.transport = if is_bluetooth { "bluetooth" } else { "lan" }.into();
     });
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (messages_tx, mut messages) = mpsc::channel(4);
@@ -1249,7 +1385,7 @@ async fn application<W: tokio::io::AsyncWrite + Unpin>(
     view(s, id, |e| {
         e.view.phase = "connected".into();
         e.view.code = None;
-        e.view.can_reconnect = e.target.is_some();
+        e.view.can_reconnect = e.target.is_some() || e.contact.is_some();
     });
     refresh_resumable(s).await?;
     transfer::run(s, id, peer, writer, messages, actions).await

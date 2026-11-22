@@ -1,5 +1,7 @@
 # InvarDrop v0.1.0-beta.1
 
+This guide applies to the published desktop prerelease. See the [next beta candidate guide](release-candidate.md) for current source and Android packaging.
+
 **Use it. It works. Forget it.** Minimal, private LAN file and folder sharing,
 without accounts, cloud storage, telemetry, autostart services, or an updater.
 This first public Beta is a prerelease for testing, not a production certification.

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "InvarDrop",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.1-beta.2",
   "identifier": "io.github.invargervi.invardrop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -14,6 +14,7 @@
     "windows": [
       {
         "title": "InvarDrop",
+        "backgroundColor": "#000000",
         "width": 720,
         "height": 520,
         "minWidth": 360,
@@ -35,11 +36,11 @@
       "icons/icon.ico"
     ],
     "license": "Apache-2.0",
-    "shortDescription": "Simple, private LAN file sharing",
+    "shortDescription": "Private file sharing with nearby devices",
     "publisher": "Invar Gervi",
     "category": "Utility",
     "homepage": "https://github.com/InvarGervi123/InvarDrop",
-    "longDescription": "Private, account-free file and folder sharing over the local network. Trusted devices, explicit receiver approval, verified streaming and resumable transfers. Optional audio conversion uses a separately selected FFmpeg executable; FFmpeg is not bundled.",
+    "longDescription": "Private, account-free file sharing over the local network with Bluetooth fallback on supported devices. Trusted devices, explicit receiver approval, verified streaming and resumable transfers. Optional audio conversion uses a separately selected FFmpeg executable; FFmpeg is not bundled.",
     "licenseFile": "../LICENSE",
     "resources": {
       "../LICENSE": "LICENSE",

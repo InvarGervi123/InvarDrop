@@ -8,6 +8,7 @@ mod identity;
 mod protocol;
 pub(crate) mod resume;
 mod store;
+pub(crate) mod stream;
 mod transport;
 
 mod service;

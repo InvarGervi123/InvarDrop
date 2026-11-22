@@ -6,29 +6,36 @@ transfers and automatic Downloads saving have been manually verified on a
 Galaxy S25, as reported by the user; see the
 [Android verification scope and limitations](docs/android-stabilization.md).
 
+Experimental Linux/Android BLE discovery and RFCOMM transfer backends are
+implemented. The user confirmed Galaxy S25 and Linux Bluetooth discovery. The
+BlueZ RFCOMM listener fix awaits an end-to-end physical connection and transfer
+test. Bluetooth sharing uses the existing TLS, pairing, approval and transfer
+protocol. Windows currently supports LAN sharing. See [Bluetooth status,
+architecture, tests and remaining hardware verification](docs/bluetooth.md).
+
 **Original author: Invar Gervi.** Free and open source under [Apache-2.0](LICENSE).
 
-## Beta release — v0.1.0-beta.1
+## Beta releases
 
-**Use it. It works. Forget it.** Fast, minimal LAN sharing without accounts,
-cloud services, telemetry, or unnecessary background services.
+The published [v0.1.0-beta.1 desktop prerelease](https://github.com/InvarGervi123/InvarDrop/releases/tag/v0.1.0-beta.1)
+covers Linux and Windows LAN sharing. See its [installation guide](docs/beta-release.md)
+for the original artifacts.
 
-Download the [first public Beta](https://github.com/InvarGervi123/InvarDrop/releases/tag/v0.1.0-beta.1).
-See [installation, checksum verification and known limitations](docs/beta-release.md).
-Linux x86_64: AppImage / Debian; Windows x86_64: NSIS / MSI. This is a testing
-prerelease, not a production-readiness or full cross-platform compatibility claim.
-The installers are unsigned; do not bypass platform security warnings.
-
-The published Beta predates Android support and the latest Downloads changes.
-Android ARM64 currently uses a development/debug APK, not a public release.
-
-Milestone 3.1 is merged through PR #15. See
-[cross-device testing coverage](docs/cross-device-testing.md),
-[packaging details](docs/packaging.md), and [UI/UX validation](docs/ui-ux-polish.md).
+The v0.1.1-beta.2 candidate prepares the redesigned sharing flow for Linux,
+Windows and Android ARM64. See the [candidate installation guide, signing steps and physical tests](docs/release-candidate.md)
+and the [changelog](CHANGELOG.md).
 
 Real automatic mDNS/DNS-SD discovery is implemented in Rust. Nearby instances
 appear and disappear in the React UI without refresh. Each run advertises a
-random session ID and an anonymous readable name. Discovery names remain unverified.
+random session ID and a platform label with a short code. Discovery names remain
+unverified.
+
+Open InvarDrop on both devices. Choose files and a nearby device in either order,
+then select **Send**. InvarDrop prefers the local network and can fall back to
+Bluetooth on supported devices. First-time pairing still needs the full comparison
+code on both screens, and each incoming request needs the receiver's approval.
+Settings contains Bluetooth controls, trusted devices, transfer recovery, and
+connection diagnostics.
 
 Secure pairing uses mutual TLS 1.3, a persistent P-256 identity and an explicit
 comparison of the full code on both devices. Trust is saved only after both
@@ -41,7 +48,7 @@ secure connections without a plaintext
 fallback.
 
 Trusted devices can send a file, multiple files or a complete nested folder over
-their existing TLS connection. Native dialogs select files or a folder; the receiver
+TLS. Native dialogs select input independently of the connection; the receiver
 explicitly approves the name, file count and total size of each operation.
 Empty directories and zero-byte files are supported, with a 1 TiB total limit,
 4096 entries and depth 16. Files stream in bounded 64 KiB chunks, with incremental BLAKE3
@@ -68,8 +75,9 @@ Revoking trust invalidates old checkpoints. Limits: 8 recovery records, 2 TiB to
 declared size, and 7 days of inactivity. Source and staging verification can require
 substantial disk IO; resume avoids retransmitting verified data, not rereading it.
 
-Optional OGG-to-MP3 conversion and post-transfer ZIP extraction are implemented
-with separate explicit approval. FFmpeg is selected locally and is not bundled.
+Enable the OGG conversion prompt in desktop Settings to choose between sending
+originals and preparing MP3 copies. FFmpeg is selected locally and is not bundled.
+A completed ZIP receipt offers extraction with a separate explicit approval.
 See [processing dependencies and security limits](docs/optional-file-processing.md).
 Compression and OS sharing integration are **not implemented**. See [resumable transfers](docs/resumable-transfers.md)
 for consent, encrypted metadata, recovery, cleanup, limits and security considerations.

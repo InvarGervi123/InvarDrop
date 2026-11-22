@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { ErrorNotice } from "./ErrorNotice";
+import { friendlyError } from "./ErrorNotice";
 import { Icon } from "./Icon";
 import type { SecureConnection, FileTransfer as Transfer } from "./useSecurity";
 
@@ -25,13 +25,13 @@ export function progressPercent(transfer: Transfer): number {
 }
 const labels: Record<string, string> = {
   offering: "Waiting for the receiver…", preparing: "Preparing transfer…",
-  sending: "Transferring · sending file…", receiving: "Transferring · receiving file…",
+  sending: "Sending…", receiving: "Receiving…",
   cancelling: "Cancelling…", cancelled: "Cancelled", committing: "Saving verified file…",
-  finalizing: "Verifying and saving…", complete: "Completed · BLAKE3 verified",
+  finalizing: "Verifying and saving…", complete: "Completed",
   rejected: "Declined", expired: "Request expired", error: "Transfer failed",
 };
 
-export function FileTransfer({ connection, operate }: { connection: SecureConnection; operate: Operate }) {
+export function FileTransfer({ connection, operate, recipient }: { connection: SecureConnection; operate: Operate; recipient?: string }) {
   const busy = useRef(false);
   const [extractConfirmed, setExtractConfirmed] = useState<string | null>(null);
   const [extracted, setExtracted] = useState<string | null>(null);
@@ -47,17 +47,13 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
   const waiting = transfer?.status === "awaiting_approval";
   const active = transfer && !["complete", "rejected", "expired", "cancelled", "error"].includes(transfer.status);
   const answered = transfer && respondedId === transfer.id;
-  const run = async (accept?: boolean, folder = false) => {
-    if (busy.current || (accept !== undefined && (!transfer || answered || !waiting || (accept && confirmedId !== transfer.id)))) return;
-    busy.current = true; setPending(true);
-    // Lock this request immediately, including the interval before the backend event.
-    const request = transfer?.id;
-    if (accept !== undefined && request) setRespondedId(request);
+  const respond = async (accept: boolean) => {
+    if (busy.current || !transfer || answered || !waiting || (accept && confirmedId !== transfer.id)) return;
+    busy.current = true;
+    setPending(true);
+    setRespondedId(transfer.id);
     try {
-      const ok = accept === undefined
-        ? await operate(folder ? "folder_choose" : "file_choose", { id: connection.id })
-        : await operate("file_respond", { id: connection.id, transferId: request, accept });
-      if (!ok && accept !== undefined) setRespondedId(null);
+      if (!await operate("file_respond", { id: connection.id, transferId: transfer.id, accept })) setRespondedId(null);
     } catch { setRespondedId(null); }
     finally { busy.current = false; setPending(false); }
   };
@@ -85,44 +81,46 @@ export function FileTransfer({ connection, operate }: { connection: SecureConnec
     : transfer?.status === "finalizing" && !incoming ? "Waiting for verification…"
     : labels[transfer?.status ?? ""] ?? "Processing file…";
   const status = transfer?.isFolder ? statusText.replace(/file/g, "folder") : statusText;
-  return <div className="file-transfer">
-    <div className="send-actions">
-    {connection.phase === "connected" && !active && <button type="button" disabled={pending || Boolean(active)} onClick={() => void run()}><Icon name="send" />Choose {connection.supportsBundles ? "files" : "a file"} to send</button>}
-    {connection.phase === "connected" && connection.supportsBundles && !active && <button type="button" className="secondary" disabled={pending} onClick={() => void run(undefined, true)}><Icon name="folder" />Choose a folder to send</button>}
-    </div>
-    {transfer && <section className="file-request" aria-label={incoming ? transfer.isFolder ? "Incoming folder request" : "Incoming file request" : "Outgoing file"}>
-      {incoming && <p className="sender-name">From <strong dir="auto">{transfer.senderName ?? "Paired device"}</strong><small>Device-reported name · verified key shown above</small></p>}
+  if (!transfer) return null;
+  const kind = transfer.resuming ? "resume" : transfer.isFolder ? "folder" : "file";
+  const title = waiting && incoming ? (transfer.resuming ? "Resume request" : transfer.isFolder ? "Incoming folder" : "Incoming file")
+    : transfer.status === "complete" ? (incoming ? "Received" : "Sent")
+    : incoming ? "Incoming transfer" : "Outgoing transfer";
+  return <section className="activity-card file-request" aria-label={title}>
+      <div className="activity-heading">
+        <span className={transfer.status === "complete" ? "tile-icon success-icon" : "tile-icon"}><Icon name={transfer.status === "complete" ? "check" : incoming ? "inbox" : "send"} /></span>
+        <div><h3>{title}</h3>
+        {incoming ? <p>From <strong dir="auto">{transfer.senderName ?? "Paired device"}</strong></p>
+          : recipient && <p>To <strong dir="auto">{recipient}</strong></p>}</div>
+      </div>
       <p className="file-name" dir="auto">{transfer.name}</p>
-      <p className="file-size" title={`${transfer.size.toLocaleString("en")} bytes`}>{formatBytes(transfer.size)}{transfer.isFolder && <> · {transfer.fileCount} files · folder</>} · {incoming ? "Incoming" : "Outgoing"}</p>
-      <p className={`request-status request-${transfer.status}`} role="status">{status}</p>
-      <div className="transfer-metrics" aria-label="Transfer statistics">
+      <p className="file-size" title={transfer.size.toLocaleString("en") + " bytes"}>{formatBytes(transfer.size)}{transfer.isFolder && <> · {transfer.fileCount} files · folder</>} · {incoming ? "Incoming" : "Outgoing"}</p>
+      <p className={`request-status request-${transfer.status}`} role="status">{answered && waiting ? "Decision sent…" : status}</p>
+      {active && (!waiting || transfer.resuming) && <div className="transfer-metrics" aria-label="Transfer statistics">
         <progress aria-label="File data progress" aria-valuetext={`${progressPercent(transfer)}% · ${formatBytes(transfer.transferred)} of ${formatBytes(transfer.size)}`} max={100} value={progressPercent(transfer)} />
         <p>{progressPercent(transfer)}% · {formatBytes(transfer.transferred)} / {formatBytes(transfer.size)}</p>
         {transfer.resuming && <p>Resuming verified data · {formatBytes(Math.max(0, transfer.size - transfer.transferred))} remaining</p>}
-        <p>{!measuring || transfer.bytesPerSecond === null ? "Speed —" : `${(transfer.bytesPerSecond / 1024 ** 2).toFixed(2)} MiB/s`}
-          {measuring && transfer.etaSeconds !== null && <> · ETA ~{formatEta(transfer.etaSeconds)}</>}</p>
-      </div>
+        {measuring && transfer.bytesPerSecond !== null && <p>{(transfer.bytesPerSecond / 1024 ** 2).toFixed(2)} MiB/s
+          {transfer.etaSeconds !== null && <> · ETA ~{formatEta(transfer.etaSeconds)}</>}</p>}
+      </div>}
       {connection.phase === "connected" && active && !(incoming && waiting) && transfer.status !== "committing" && <button type="button" className="secondary" disabled={pending || cancelId === transfer.id || transfer.status === "cancelling"} onClick={() => void cancelTransfer()}>Cancel transfer</button>}
-      {connection.supportsResume && active && <p className="file-hint">Cancel stops this operation and removes incomplete received data. Discard removes a saved recovery record.</p>}
-      {transfer.status === "cancelled" && <p className="file-hint">Transfer stopped. Reconnect to send another file.</p>}
+      {transfer.status === "cancelled" && <p className="file-hint">Choose files to start a new transfer.</p>}
       {incoming && waiting && connection.phase === "connected" && <>
         <label className="comparison-check"><input type="checkbox" checked={confirmedId === transfer.id} disabled={pending || Boolean(answered)} onChange={event => setConfirmedId(event.target.checked ? transfer.id : null)} />I want to {transfer.resuming ? "resume" : "save"} this {transfer.isFolder ? "folder" : "file"}</label>
         <div className="request-actions">
-          <button type="button" className="secondary" disabled={pending || Boolean(answered)} onClick={() => void run(false)}>Decline {transfer.resuming ? "resume" : transfer.isFolder ? "folder" : "file"}</button>
-          <button type="button" disabled={pending || Boolean(answered) || confirmedId !== transfer.id} onClick={() => void run(true)}>Accept {transfer.resuming ? "resume" : transfer.isFolder ? "folder" : "file"}</button>
+          <button type="button" className="secondary" disabled={pending || Boolean(answered)} onClick={() => void respond(false)}>Decline {kind}</button>
+          <button type="button" disabled={pending || Boolean(answered) || confirmedId !== transfer.id} onClick={() => void respond(true)}>Accept {kind}</button>
         </div>
-        <p className="file-hint">{answered ? "Decision sent…" : transfer.resuming ? "Saved data stays isolated. Resume starts only after you accept; declining keeps the recovery data. The request expires after 90 seconds." : "Nothing is saved until you accept. The request expires after 90 seconds."}</p>
+        <p className="file-hint">{transfer.resuming ? "Declining keeps the verified recovery data." : "Accepted files are saved after verification."}</p>
       </>}
       {incoming && ["rejected", "expired"].includes(transfer.status) && <p className="file-hint">{transfer.resuming ? "Resume did not start. Saved recovery data is kept." : "No file was saved."}</p>}
-      {incoming && transfer.status === "complete" && !transfer.isFolder && transfer.name.toLowerCase().endsWith(".zip") && <div className="zip-extraction">
-        <h3>ZIP extraction (optional)</h3>
+      {incoming && transfer.status === "complete" && !transfer.isFolder && transfer.name.toLowerCase().endsWith(".zip") && <details className="zip-extraction"><summary>Extract archive</summary>
         <p className="file-hint">The verified ZIP stays saved. Extract a separate copy only if you want to; extracted content is never opened or run.</p>
         <label className="comparison-check"><input type="checkbox" checked={extractConfirmed === extractionKey} disabled={extracted === extractionKey} onChange={event => setExtractConfirmed(event.target.checked ? extractionKey : null)} />I want to extract this ZIP</label>
         <button type="button" disabled={extractConfirmed !== extractionKey || extracted === extractionKey} onClick={() => void extract()}>{extracted === extractionKey ? "Extraction requested" : "Extract ZIP"}</button>
         {extracted === extractionKey && <p className="file-hint">Check File preparation &amp; extraction below for the result. Your original ZIP is kept.</p>}
-      </div>}
+      </details>}
       {(transfer.downloadPath || transfer.path) && <p className="saved-path">Saved to: <span dir="auto">{transfer.downloadPath || transfer.path}</span></p>}
-      {transfer.error && transfer.status !== "expired" && <ErrorNotice message={transfer.error} />}
-    </section>}
-  </div>;
+      {transfer.status === "error" && <p className="error-text" role="alert">{transfer.error ? friendlyError(transfer.error) : "Ask the other device to try again."}</p>}
+    </section>;
 }

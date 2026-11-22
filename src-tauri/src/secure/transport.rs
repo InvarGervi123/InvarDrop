@@ -9,7 +9,6 @@ use rustls::{
     server::danger::{ClientCertVerified, ClientCertVerifier},
 };
 use std::sync::Arc;
-use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 
 pub const LEGACY_ALPN: &[u8] = b"invardrop/4";
@@ -153,8 +152,8 @@ pub fn connector(identity: &Identity, expected: Option<String>) -> Result<TlsCon
 }
 /// Exporter label/context separate this SAS from every other application/purpose.
 /// Canonical roles bind both proven TLS keys; names and discovery IDs are absent.
-pub fn peer_and_code(
-    stream: &TlsStream<TcpStream>,
+pub fn peer_and_code<S>(
+    stream: &TlsStream<S>,
     local: &str,
     initiator: bool,
 ) -> Result<(String, String)> {

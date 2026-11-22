@@ -1,6 +1,20 @@
 //! Connection-stage diagnostics. Never log certificates, pairing codes or keys.
 use super::*;
 
+pub(super) fn allows_fallback(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::NetworkPermission
+            | Error::NoEndpoint
+            | Error::TcpTimeout
+            | Error::TcpRefused
+            | Error::TcpPermission
+            | Error::TcpConnect
+            | Error::TlsHandshake
+            | Error::TlsTimeout
+    )
+}
+
 pub(super) fn listen_port(value: Option<&str>) -> Result<u16> {
     match value {
         None => Ok(0),
@@ -39,6 +53,10 @@ impl Failures {
     }
 }
 pub(super) async fn tcp(addresses: Vec<SocketAddr>) -> Result<(TcpStream, SocketAddr)> {
+    #[cfg(target_os = "android")]
+    if !crate::network_permission::NETWORK.allowed() {
+        return Err(Error::NetworkPermission);
+    }
     if addresses.is_empty() {
         return Err(Error::NoEndpoint);
     }
@@ -77,12 +95,46 @@ pub(super) fn tls_error(error: std::io::Error) -> Error {
             | rustls::Error::NoCertificatesPresented
             | rustls::Error::General(_),
         ) => Error::Identity,
+        Some(_) => Error::Protocol,
         _ => Error::TlsHandshake,
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fallback_is_only_for_connection_failures_not_security_or_consent() {
+        for error in [
+            Error::NoEndpoint,
+            Error::TcpTimeout,
+            Error::TcpRefused,
+            Error::TcpPermission,
+            Error::TcpConnect,
+            Error::TlsHandshake,
+            Error::TlsTimeout,
+        ] {
+            assert!(allows_fallback(&error));
+        }
+        for error in [
+            Error::Identity,
+            Error::Protocol,
+            Error::Revoked,
+            Error::Approval,
+            Error::Rejected,
+            Error::Cancelled,
+            Error::Integrity,
+            Error::AuthenticationTimeout,
+        ] {
+            assert!(!allows_fallback(&error));
+        }
+        assert_eq!(
+            tls_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                rustls::Error::NoApplicationProtocol
+            )),
+            Error::Protocol
+        );
+    }
     #[test]
     fn explicit_listener_port_is_validated_without_changing_the_ephemeral_default() {
         assert_eq!(listen_port(None).unwrap(), 0);

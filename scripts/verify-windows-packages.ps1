@@ -19,6 +19,9 @@ if ($SelfTest) {
         $expected = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
         if ((Get-PackageFileHash $temporary) -ne $expected) { throw 'Literal archive filename hash regression failed' }
         if ((Get-ExpectedMsiVersion '0.1.0-beta.1' '0.1.0.1') -ne [version]'0.1.0.1') { throw 'Beta MSI version mapping failed' }
+        $previousBeta = Get-ExpectedMsiVersion '0.1.0-beta.1' '0.1.0.1'
+        $candidate = Get-ExpectedMsiVersion '0.1.1-beta.2' '0.1.1'
+        if ([version]$candidate.ToString(3) -le [version]$previousBeta.ToString(3)) { throw 'Effective MSI version must advance' }
         if ((Get-ExpectedMsiVersion '0.1.0' '') -ne [version]'0.1.0') { throw 'Stable MSI version mapping failed' }
         Write-Output 'PASS: literal-path hashing of archive filenames containing square brackets'
         Write-Output 'PASS: prerelease and stable MSI numeric version mapping'

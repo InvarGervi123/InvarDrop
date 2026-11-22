@@ -6,7 +6,14 @@ pub(super) const SERVICE_TYPE: &str = "_invardrop._tcp.local.";
 
 pub(super) fn local_device() -> Device {
     let id = Uuid::new_v4().to_string();
-    let name = format!("InvarDrop {}", &id[..8]);
+    // A friendly local label avoids advertising an account name or hostname.
+    let label = match std::env::consts::OS {
+        "android" => "Android phone",
+        "linux" => "Linux computer",
+        "windows" => "Windows PC",
+        _ => "InvarDrop device",
+    };
+    let name = format!("{label} {}", id[..4].to_ascii_uppercase());
     Device {
         id,
         name,
@@ -137,7 +144,7 @@ mod tests {
         let a = local_device();
         let b = local_device();
         assert_ne!(a.id, b.id);
-        assert!(a.name.starts_with("InvarDrop "));
+        assert!(a.name.ends_with(&a.id[..4].to_ascii_uppercase()));
         let info = announcement(&a, 12, 0).unwrap();
         assert_eq!(info.get_port(), 0);
         assert!(info.is_addr_auto());

@@ -7,7 +7,7 @@ afterEach(cleanup);
 const connection = (): SecureConnection => ({ id: "pair", phase: "verifying", peer: "a".repeat(64), code: "0000 1111 2222 3333 4444 5555 6666 7777", supportsResume: true, supportsBundles: true, localApproved: false, canReconnect: false, error: null, transfer: null });
 it("marks pairing as untrusted and requires a full-code confirmation", () => {
   const operate = vi.fn(); render(<PairCard connection={connection()} operate={operate} />);
-  expect(screen.getByText("Not trusted yet")).toBeTruthy();
+  expect(screen.getByText("Pair devices")).toBeTruthy();
   const approve = screen.getByRole("button", { name: "Codes match — pair" }) as HTMLButtonElement;
   expect(approve.disabled).toBe(true); expect(screen.queryByRole("button", { name: /send/ })).toBeNull();
   expect(document.activeElement).not.toBe(approve); fireEvent.click(approve); expect(operate).not.toHaveBeenCalled();
@@ -36,26 +36,7 @@ it("allows pairing retry after an IPC failure without assuming approval", async 
   fireEvent.click(approve); await waitFor(() => expect(approve.disabled).toBe(false)); fireEvent.click(approve);
   await waitFor(() => expect(operate).toHaveBeenCalledTimes(2));
 });
-it("shows trusted status only after the authenticated connection is established", () => {
-  render(<PairCard connection={{ ...connection(), phase: "connected", code: null, localApproved: true }} operate={vi.fn()} />);
-  expect(screen.getByText("Trusted key")).toBeTruthy(); expect(screen.getByText(/Peer key verified over TLS 1.3/)).toBeTruthy();
-  expect(screen.queryByRole("checkbox")).toBeNull(); expect(screen.getByRole("button", { name: "Choose files to send" })).toBeTruthy();
-});
-it("offers pinned reconnect and actionable guidance after disconnection", () => {
-  render(<PairCard connection={{ ...connection(), phase: "closed", code: null, canReconnect: true, error: "Connection failed or disconnected" }} operate={vi.fn()} />);
-  expect(screen.getByRole("alert").textContent).toContain("same network");
-  expect(screen.getByRole("button", { name: "Reconnect with pinned key" })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Choose files to send" })).toBeNull();
-});
-
-it("shows a propagated transfer error once and retains distinct connection errors", () => {
-  const c = { ...connection(), phase: "closed", code: null, error: "File could not be read or saved", transfer: {
-    id: "file", direction: "incoming", name: "image.png", size: 123, transferred: 0,
-    status: "error", error: "File could not be read or saved", path: null,
-    bytesPerSecond: null, etaSeconds: null,
-  } } as SecureConnection;
-  const view = render(<PairCard connection={c} operate={vi.fn()} />);
-  expect(screen.getAllByRole("alert")).toHaveLength(1);
-  view.rerender(<PairCard connection={{ ...c, error: "Connection failed or disconnected" }} operate={vi.fn()} />);
-  expect(screen.getAllByRole("alert")).toHaveLength(2);
+it.each(["closed", "connected", "committing"])("shows no pairing actions for %s", phase => {
+  render(<PairCard connection={{ ...connection(), phase }} operate={vi.fn()} />);
+  expect(screen.queryByRole("region", { name: "Pairing verification" })).toBeNull();
 });

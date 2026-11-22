@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export interface SecureConnection {
+  transport?: "lan" | "bluetooth";
   id: string; phase: string; peer: string | null; code: string | null;
   supportsResume: boolean; supportsBundles: boolean; localApproved: boolean; canReconnect: boolean; error: string | null;
   transfer: FileTransfer | null;
