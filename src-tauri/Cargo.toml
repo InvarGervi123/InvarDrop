@@ -49,7 +49,7 @@ libc = "0.2"
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
+jni = "0.22"
 ndk-context = "0.1"
 
 [target.'cfg(windows)'.dependencies]
